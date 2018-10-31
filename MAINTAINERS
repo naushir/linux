@@ -3199,7 +3199,8 @@ N:	bcm2835
 F:	drivers/staging/vc04_services
 
 BROADCOM BCM2835 CAMERA DRIVER
-M:	Dave Stevenson <dave.stevenson@raspberrypi.org>
+M:	Dave Stevenson <dave.stevenson@raspberrypi.com>
+M:	Naushir Patuck <naush@raspberrypi.com>
 L:	linux-media@vger.kernel.org
 S:	Maintained
 F:	drivers/media/platform/bcm2835/
