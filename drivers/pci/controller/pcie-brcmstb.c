@@ -386,49 +386,15 @@ MODULE_PARM_DESC(bounce_threshold, "Bounce threshold");
 
 static struct brcm_pcie *g_pcie;
 
-static dma_addr_t brcm_to_pci(dma_addr_t addr)
-{
-	struct of_pci_range *p;
-
-	if (!num_dma_ranges)
-		return addr;
-
-	for (p = dma_ranges; p < &dma_ranges[num_dma_ranges]; p++)
-		if (addr >= p->cpu_addr && addr < (p->cpu_addr + p->size))
-			return addr - p->cpu_addr + p->pci_addr;
-
-	return addr;
-}
-
-static dma_addr_t brcm_to_cpu(dma_addr_t addr)
-{
-	struct of_pci_range *p;
-
-	if (!num_dma_ranges)
-		return addr;
-
-	for (p = dma_ranges; p < &dma_ranges[num_dma_ranges]; p++)
-		if (addr >= p->pci_addr && addr < (p->pci_addr + p->size))
-			return addr - p->pci_addr + p->cpu_addr;
-
-	return addr;
-}
-
 static void *brcm_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 			gfp_t gfp, unsigned long attrs)
 {
-	void *ret;
-
-	ret = arch_dma_ops->alloc(dev, size, handle, gfp, attrs);
-	if (ret)
-		*handle = brcm_to_pci(*handle);
-	return ret;
+	return arch_dma_ops->alloc(dev, size, handle, gfp, attrs);
 }
 
 static void brcm_free(struct device *dev, size_t size, void *cpu_addr,
 		      dma_addr_t handle, unsigned long attrs)
 {
-	handle = brcm_to_cpu(handle);
 	arch_dma_ops->free(dev, size, cpu_addr, handle, attrs);
 }
 
@@ -436,7 +402,6 @@ static int brcm_mmap(struct device *dev, struct vm_area_struct *vma,
 		     void *cpu_addr, dma_addr_t dma_addr, size_t size,
 		     unsigned long attrs)
 {
-	dma_addr = brcm_to_cpu(dma_addr);
 	return arch_dma_ops->mmap(dev, vma, cpu_addr, dma_addr, size, attrs);
 }
 
@@ -444,9 +409,8 @@ static int brcm_get_sgtable(struct device *dev, struct sg_table *sgt,
 			    void *cpu_addr, dma_addr_t handle, size_t size,
 			    unsigned long attrs)
 {
-	handle = brcm_to_cpu(handle);
 	return arch_dma_ops->get_sgtable(dev, sgt, cpu_addr, handle, size,
-				       attrs);
+					 attrs);
 }
 
 static dma_addr_t brcm_map_page(struct device *dev, struct page *page,
@@ -454,15 +418,14 @@ static dma_addr_t brcm_map_page(struct device *dev, struct page *page,
 				enum dma_data_direction dir,
 				unsigned long attrs)
 {
-	return brcm_to_pci(arch_dma_ops->map_page(dev, page, offset, size,
-						  dir, attrs));
+	return arch_dma_ops->map_page(dev, page, offset, size,
+				      dir, attrs);
 }
 
 static void brcm_unmap_page(struct device *dev, dma_addr_t handle,
 			    size_t size, enum dma_data_direction dir,
 			    unsigned long attrs)
 {
-	handle = brcm_to_cpu(handle);
 	arch_dma_ops->unmap_page(dev, handle, size, dir, attrs);
 }
 
@@ -507,7 +470,6 @@ static void brcm_sync_single_for_cpu(struct device *dev,
 				     dma_addr_t handle, size_t size,
 				     enum dma_data_direction dir)
 {
-	handle = brcm_to_cpu(handle);
 	arch_dma_ops->sync_single_for_cpu(dev, handle, size, dir);
 }
 
@@ -515,7 +477,6 @@ static void brcm_sync_single_for_device(struct device *dev,
 					dma_addr_t handle, size_t size,
 					enum dma_data_direction dir)
 {
-	handle = brcm_to_cpu(handle);
 	arch_dma_ops->sync_single_for_device(dev, handle, size, dir);
 }
 
@@ -525,9 +486,8 @@ static dma_addr_t brcm_map_resource(struct device *dev, phys_addr_t phys,
 				    unsigned long attrs)
 {
 	if (arch_dma_ops->map_resource)
-		return brcm_to_pci(arch_dma_ops->map_resource
-				   (dev, phys, size, dir, attrs));
-	return brcm_to_pci((dma_addr_t)phys);
+		return arch_dma_ops->map_resource(dev, phys, size, dir, attrs);
+	return (dma_addr_t)phys;
 }
 
 static void brcm_unmap_resource(struct device *dev, dma_addr_t handle,
@@ -535,8 +495,7 @@ static void brcm_unmap_resource(struct device *dev, dma_addr_t handle,
 				unsigned long attrs)
 {
 	if (arch_dma_ops->unmap_resource)
-		arch_dma_ops->unmap_resource(dev, brcm_to_cpu(handle), size,
-					     dir, attrs);
+		arch_dma_ops->unmap_resource(dev, handle, size, dir, attrs);
 }
 
 void brcm_sync_sg_for_cpu(struct device *dev, struct scatterlist *sgl,
@@ -611,28 +570,6 @@ static const struct dma_map_ops brcm_dma_ops = {
 
 static void brcm_set_dma_ops(struct device *dev)
 {
-	int ret;
-
-	if (IS_ENABLED(CONFIG_ARM64)) {
-		/*
-		 * We are going to invoke get_dma_ops().  That
-		 * function, at this point in time, invokes
-		 * get_arch_dma_ops(), and for ARM64 that function
-		 * returns a pointer to dummy_dma_ops.  So then we'd
-		 * like to call arch_setup_dma_ops(), but that isn't
-		 * exported.  Instead, we call of_dma_configure(),
-		 * which is exported, and this calls
-		 * arch_setup_dma_ops().  Once we do this the call to
-		 * get_dma_ops() will work properly because
-		 * dev->dma_ops will be set.
-		 */
-		ret = of_dma_configure(dev, dev->of_node, true);
-		if (ret) {
-			dev_err(dev, "of_dma_configure() failed: %d\n", ret);
-			return;
-		}
-	}
-
 	arch_dma_ops = get_dma_ops(dev);
 	if (!arch_dma_ops) {
 		dev_err(dev, "failed to get arch_dma_ops\n");
@@ -651,12 +588,12 @@ static int brcmstb_platform_notifier(struct notifier_block *nb,
 	extern unsigned long max_pfn;
 	struct device *dev = __dev;
 	const char *rc_name = "0000:00:00.0";
+	int ret;
 
 	switch (event) {
 	case BUS_NOTIFY_ADD_DEVICE:
 		if (max_pfn > (bounce_threshold/PAGE_SIZE) &&
 		    strcmp(dev->kobj.name, rc_name)) {
-			int ret;
 
 			ret = brcm_pcie_bounce_register_dev(dev);
 			if (ret) {
@@ -666,6 +603,12 @@ static int brcmstb_platform_notifier(struct notifier_block *nb,
 				return ret;
 			}
 			brcm_set_dma_ops(dev);
+		} else if (IS_ENABLED(CONFIG_ARM64)) {
+			ret = of_dma_configure(dev, dev->of_node, true);
+			if (ret) {
+				dev_err(dev, "of_dma_configure() failed: %d\n", ret);
+				return ret;
+			}
 		}
 		return NOTIFY_OK;
 
@@ -1701,7 +1644,8 @@ MODULE_DEVICE_TABLE(of, brcm_pcie_match);
 
 static int brcm_pcie_probe(struct platform_device *pdev)
 {
-	struct device_node *dn = pdev->dev.of_node, *msi_dn;
+	struct device *dev = &pdev->dev;
+	struct device_node *dn = dev->of_node, *msi_dn;
 	const struct of_device_id *of_id;
 	const struct pcie_cfg_data *data;
 	int ret;
@@ -1712,7 +1656,7 @@ static int brcm_pcie_probe(struct platform_device *pdev)
 	struct pci_bus *child;
 	extern unsigned long max_pfn;
 
-	bridge = devm_pci_alloc_host_bridge(&pdev->dev, sizeof(*pcie));
+	bridge = devm_pci_alloc_host_bridge(dev, sizeof(*pcie));
 	if (!bridge)
 		return -ENOMEM;
 
@@ -1721,7 +1665,7 @@ static int brcm_pcie_probe(struct platform_device *pdev)
 
 	of_id = of_match_node(brcm_pcie_match, dn);
 	if (!of_id) {
-		dev_err(&pdev->dev, "failed to look up compatible string\n");
+		dev_err(dev, "failed to look up compatible string\n");
 		return -EINVAL;
 	}
 
@@ -1731,7 +1675,7 @@ static int brcm_pcie_probe(struct platform_device *pdev)
 	pcie->max_burst_size = data->max_burst_size;
 	pcie->type = data->type;
 	pcie->dn = dn;
-	pcie->dev = &pdev->dev;
+	pcie->dev = dev;
 
 	/* We use the domain number as our controller number */
 	pcie->id = of_get_pci_domain_nr(dn);
@@ -1742,18 +1686,24 @@ static int brcm_pcie_probe(struct platform_device *pdev)
 	if (!res)
 		return -EINVAL;
 
-	base = devm_ioremap_resource(&pdev->dev, res);
+	base = devm_ioremap_resource(dev, res);
 	if (IS_ERR(base))
 		return PTR_ERR(base);
+
+	ret = dma_set_coherent_mask(dev, DMA_BIT_MASK(34));
+	if (ret < 0) {
+		dev_err(dev, "failed to set DMA coherent mask: %d\n", ret);
+		return ret;
+	}
 
 	/* To Do: Add hardware check if this ever gets fixed */
 	if (max_pfn > (bounce_threshold/PAGE_SIZE)) {
 		int ret;
-		ret = brcm_pcie_bounce_init(&pdev->dev, bounce_buffer,
+		ret = brcm_pcie_bounce_init(dev, bounce_buffer,
 					    (dma_addr_t)bounce_threshold);
 		if (ret) {
 			if (ret != -EPROBE_DEFER)
-				dev_err(&pdev->dev,
+				dev_err(dev,
 					"could not init bounce buffers: %d\n",
 					ret);
 			return ret;
@@ -1762,7 +1712,7 @@ static int brcm_pcie_probe(struct platform_device *pdev)
 
 	pcie->clk = of_clk_get_by_name(dn, "sw_pcie");
 	if (IS_ERR(pcie->clk)) {
-		dev_warn(&pdev->dev, "could not get clock\n");
+		dev_warn(dev, "could not get clock\n");
 		pcie->clk = NULL;
 	}
 	pcie->base = base;
@@ -1772,7 +1722,7 @@ static int brcm_pcie_probe(struct platform_device *pdev)
 
 	pcie->ssc = of_property_read_bool(dn, "brcm,enable-ssc");
 
-	ret = irq_of_parse_and_map(pdev->dev.of_node, 0);
+	ret = irq_of_parse_and_map(dev->of_node, 0);
 	if (ret == 0)
 		/* keep going, as we don't use this intr yet */
 		dev_warn(pcie->dev, "cannot get PCIe interrupt\n");
@@ -1786,7 +1736,7 @@ static int brcm_pcie_probe(struct platform_device *pdev)
 	ret = clk_prepare_enable(pcie->clk);
 	if (ret) {
 		if (ret != -EPROBE_DEFER)
-			dev_err(&pdev->dev, "could not enable clock\n");
+			dev_err(dev, "could not enable clock\n");
 		return ret;
 	}
 
@@ -1813,7 +1763,7 @@ static int brcm_pcie_probe(struct platform_device *pdev)
 	}
 
 	list_splice_init(&pcie->resources, &bridge->windows);
-	bridge->dev.parent = &pdev->dev;
+	bridge->dev.parent = dev;
 	bridge->busnr = 0;
 	bridge->ops = &brcm_pcie_ops;
 	bridge->sysdata = pcie;
