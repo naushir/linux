@@ -683,6 +683,18 @@ static void unicam_wr_dma_addr(struct unicam_device *dev, unsigned int dmaaddr,
 	}
 }
 
+static inline int unicam_get_lines_done(struct unicam_device *dev)
+{
+	u32 start_addr, cur_addr;
+	u32 stride = dev->node[IMAGE_PAD].v_fmt.fmt.pix.bytesperline;
+
+	start_addr =
+	(u32)vb2_dma_contig_plane_dma_addr(&dev->node[IMAGE_PAD].cur_frm->vb.vb2_buf,
+					   0);
+	cur_addr = reg_read(&dev->cfg, UNICAM_IBWP);
+	return (cur_addr - start_addr) / stride;
+}
+
 static inline void unicam_schedule_next_buffer(struct unicam_node *node)
 {
 	struct unicam_device *dev = node->dev;
@@ -750,6 +762,7 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 	u64 ts;
 	int ista, sta;
 	unsigned int sequence = unicam->sequence;
+	unsigned int lines_done = unicam_get_lines_done(dev);
 	int i;
 
 	/*
@@ -771,6 +784,9 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 
 	if (!(sta && (UNICAM_IS | UNICAM_PI0)))
 		return IRQ_HANDLED;
+
+	unicam_dbg(3, unicam, "ISR: ISTA: 0x%X, STA: 0x%X, lines_done: %d, sequence %d",
+		   ista, sta, lines_done, sequence);
 
 	if (ista & UNICAM_FSI) {
 		/*
@@ -799,7 +815,11 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 		unicam->sequence++;
 	}
 
-	if (ista & (UNICAM_FSI | UNICAM_LCI)) {
+	/* Cannot swap buffer at frame end, there may be a race condition
+	 * where the HW does not actually swap it if the new frame has
+	 * already started.
+	 */
+	if (ista & (UNICAM_FSI | UNICAM_LCI) && !(ista & UNICAM_FEI)) {
 		for (i = 0; i < num_nodes_streaming; i++) {
 			spin_lock(&unicam->node[i].dma_queue_lock);
 			if (!list_empty(&unicam->node[i].dma_queue.active) &&
