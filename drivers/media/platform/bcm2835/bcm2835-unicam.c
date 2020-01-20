@@ -105,7 +105,7 @@ MODULE_PARM_DESC(debug, "Debug level 0-3");
 /*
  * Stride is a 16 bit register, but also has to be a multiple of 16.
  */
-#define BPL_ALIGNMENT		16
+#define BPL_ALIGNMENT		32
 #define MAX_BYTESPERLINE	((1 << 16) - BPL_ALIGNMENT)
 /*
  * Max width is therefore determined by the max stride divided by
