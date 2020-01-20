@@ -119,6 +119,8 @@ MODULE_PARM_DESC(debug, "Debug level 0-3");
 /* Define a nominal minimum image size */
 #define MIN_WIDTH	16
 #define MIN_HEIGHT	16
+/* Default size of the embedded buffer */
+#define UNICAM_EMBEDDED_SIZE	8192
 
 enum pad_types {
 	IMAGE_PAD,
@@ -397,6 +399,7 @@ struct unicam_node {
 	struct unicam_device *dev;
 	struct media_pad pad;
 	struct v4l2_ctrl_handler ctrl_handler;
+	unsigned int embedded_lines;
 };
 
 struct unicam_device {
@@ -637,17 +640,18 @@ static int unicam_reset_format(struct unicam_node *node)
 	struct v4l2_mbus_framefmt mbus_fmt;
 	int ret;
 
-	ret = __subdev_get_format(dev, &mbus_fmt, node->pad_id);
-	if (ret) {
-		unicam_err(dev, "Failed to get_format - ret %d\n", ret);
-		return ret;
-	}
+	if (dev->sensor_embedded_data || node->pad_id != METADATA_PAD) {
+		ret = __subdev_get_format(dev, &mbus_fmt, node->pad_id);
+		if (ret) {
+			unicam_err(dev, "Failed to get_format - ret %d\n", ret);
+			return ret;
+		}
 
-	if (mbus_fmt.code != node->fmt->code) {
-		unicam_err(dev,
-			   "code mismatch - fmt->code %08x, mbus_fmt.code %08x\n",
-			   node->fmt->code, mbus_fmt.code);
-		return ret;
+		if (mbus_fmt.code != node->fmt->code) {
+			unicam_err(dev, "code mismatch - fmt->code %08x, mbus_fmt.code %08x\n",
+				   node->fmt->code, mbus_fmt.code);
+			return ret;
+		}
 	}
 
 	if (node->pad_id == IMAGE_PAD) {
@@ -657,7 +661,14 @@ static int unicam_reset_format(struct unicam_node *node)
 	} else {
 		node->v_fmt.type = V4L2_BUF_TYPE_META_CAPTURE;
 		node->v_fmt.fmt.meta.dataformat = V4L2_META_FMT_EMBED_DATA;
-		node->v_fmt.fmt.meta.buffersize = mbus_fmt.width;
+		if (dev->sensor_embedded_data) {
+			node->v_fmt.fmt.meta.buffersize =
+					mbus_fmt.width * mbus_fmt.height;
+			node->embedded_lines = mbus_fmt.height;
+		} else {
+			node->v_fmt.fmt.meta.buffersize = UNICAM_EMBEDDED_SIZE;
+			node->embedded_lines = 1;
+		}
 	}
 
 	node->m_fmt = mbus_fmt;
@@ -1516,7 +1527,7 @@ static void unicam_start_rx(struct unicam_device *dev, unsigned long *addr)
 	set_field(&val, 1, UNICAM_FL1);
 	reg_write(cfg, UNICAM_MISC, val);
 
-	if (dev->node[METADATA_PAD].streaming) {
+	if (dev->node[METADATA_PAD].streaming && dev->sensor_embedded_data) {
 		unicam_enable_ed(dev);
 		unicam_wr_dma_addr(dev, addr[METADATA_PAD], METADATA_PAD);
 	}
@@ -1526,6 +1537,10 @@ static void unicam_start_rx(struct unicam_device *dev, unsigned long *addr)
 
 	/* Load image pointers */
 	reg_write_field(cfg, UNICAM_ICTL, 1, UNICAM_LIP_MASK);
+
+	/* Load embedded data buffer pointers if needed */
+	if (dev->node[METADATA_PAD].streaming && dev->sensor_embedded_data)
+		reg_write_field(cfg, UNICAM_DCS, 1, UNICAM_LDP);
 
 	/*
 	 * Enable trigger only for the first frame to
@@ -2190,34 +2205,40 @@ static int register_node(struct unicam_device *unicam, struct unicam_node *node,
 	const struct unicam_fmt *fmt;
 	int ret;
 
-	ret = __subdev_get_format(unicam, &mbus_fmt, pad_id);
-	if (ret) {
-		unicam_err(unicam, "Failed to get_format - ret %d\n", ret);
-		return ret;
-	}
+	if (unicam->sensor_embedded_data || pad_id != METADATA_PAD) {
+		ret = __subdev_get_format(unicam, &mbus_fmt, pad_id);
+		if (ret) {
+			unicam_err(unicam, "Failed to get_format - ret %d\n",
+				   ret);
+			return ret;
+		}
 
-	fmt = find_format_by_code(mbus_fmt.code);
-	if (!fmt) {
-		/* Find the first format that the sensor and unicam both
-		 * support
-		 */
-		fmt = get_first_supported_format(unicam);
+		fmt = find_format_by_code(mbus_fmt.code);
+		if (!fmt) {
+			/* Find the first format that the sensor and unicam both
+			 * support
+			 */
+			fmt = get_first_supported_format(unicam);
 
-		if (!fmt)
-			/* No compatible formats */
-			return -EINVAL;
+			if (!fmt)
+				/* No compatible formats */
+				return -EINVAL;
 
-		mbus_fmt.code = fmt->code;
-		ret = __subdev_set_format(unicam, &mbus_fmt, pad_id);
-		if (ret)
-			return -EINVAL;
-	}
-	if (mbus_fmt.field != V4L2_FIELD_NONE) {
-		/* Interlaced not supported - disable it now. */
-		mbus_fmt.field = V4L2_FIELD_NONE;
-		ret = __subdev_set_format(unicam, &mbus_fmt, pad_id);
-		if (ret)
-			return -EINVAL;
+			mbus_fmt.code = fmt->code;
+			ret = __subdev_set_format(unicam, &mbus_fmt, pad_id);
+			if (ret)
+				return -EINVAL;
+		}
+		if (mbus_fmt.field != V4L2_FIELD_NONE) {
+			/* Interlaced not supported - disable it now. */
+			mbus_fmt.field = V4L2_FIELD_NONE;
+			ret = __subdev_set_format(unicam, &mbus_fmt, pad_id);
+			if (ret)
+				return -EINVAL;
+		}
+	} else {
+		/* Fix this node format as embedded data. */
+		fmt = find_format_by_code(MEDIA_BUS_FMT_CSI2_EMBEDDED_DATA);
 	}
 
 	node->dev = unicam;
@@ -2349,12 +2370,14 @@ static int register_node(struct unicam_device *unicam, struct unicam_node *node,
 	    !v4l2_subdev_has_op(unicam->sensor, pad, enum_frame_size))
 		v4l2_disable_ioctl(&node->video_dev, VIDIOC_ENUM_FRAMESIZES);
 
-	ret = media_create_pad_link(&unicam->sensor->entity,
-				    pad_id, &node->video_dev.entity, 0,
-				    MEDIA_LNK_FL_ENABLED |
-				    MEDIA_LNK_FL_IMMUTABLE);
-	if (ret)
-		unicam_err(unicam, "Unable to create pad links.\n");
+	if (unicam->sensor_embedded_data) {
+		ret = media_create_pad_link(&unicam->sensor->entity, pad_id,
+					    &node->video_dev.entity, 0,
+					    MEDIA_LNK_FL_ENABLED |
+					    MEDIA_LNK_FL_IMMUTABLE);
+		if (ret)
+			unicam_err(unicam, "Unable to create pad links.\n");
+	}
 
 	return ret;
 }
@@ -2383,20 +2406,20 @@ static int unicam_probe_complete(struct unicam_device *unicam)
 	if (!unicam->sensor_config)
 		return -ENOMEM;
 
+	unicam->sensor_embedded_data = (unicam->sensor->entity.num_pads >= 2);
+
 	ret = register_node(unicam, &unicam->node[IMAGE_PAD],
 			    V4L2_BUF_TYPE_VIDEO_CAPTURE, IMAGE_PAD);
 	if (ret) {
 		unicam_err(unicam, "Unable to register subdev node 0.\n");
 		goto unregister;
 	}
-	if (unicam->sensor->entity.num_pads >= 2) {
-		ret = register_node(unicam, &unicam->node[METADATA_PAD],
-				    V4L2_BUF_TYPE_META_CAPTURE, METADATA_PAD);
-		if (ret) {
-			unicam_err(unicam,
-				   "Unable to register subdev node 1.\n");
-			goto unregister;
-		}
+
+	ret = register_node(unicam, &unicam->node[METADATA_PAD],
+			    V4L2_BUF_TYPE_META_CAPTURE, METADATA_PAD);
+	if (ret) {
+		unicam_err(unicam, "Unable to register subdev node 1.\n");
+		goto unregister;
 	}
 
 	ret = v4l2_device_register_subdev_nodes(&unicam->v4l2_dev);
