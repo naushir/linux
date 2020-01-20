@@ -71,6 +71,9 @@
 #include <linux/uaccess.h>
 #include <linux/videodev2.h>
 #include <linux/dma-mapping.h>
+#include <linux/bcm2835-unicam.h>
+#include <linux/workqueue.h>
+#include <linux/string.h>
 
 #include <media/v4l2-common.h>
 #include <media/v4l2-ctrls.h>
@@ -359,6 +362,64 @@ static const struct unicam_fmt formats[] = {
 	}
 };
 
+struct unicam_ctrl_mapping {
+	u32 id;
+	u32 delay;
+};
+
+static struct unicam_ctrl_mapping unicam_ctrl_list[] = {
+	{
+		.id		= V4L2_CID_EXPOSURE,
+		.delay		= 2
+	},
+	{
+		.id		= V4L2_CID_VBLANK,
+		.delay		= 2
+	},
+	{
+		.id		= V4L2_CID_HBLANK,
+		.delay		= 2
+	},
+	{
+		.id		= V4L2_CID_ANALOGUE_GAIN,
+		.delay		= 1
+	}
+};
+
+#define NUM_CTRLS ARRAY_SIZE(unicam_ctrl_list)
+
+/* Maxumum number of control values in the list.
+ * Must be a power of 2.
+ */
+#define MAX_CTRL_LIST 4
+struct unicam_ctrls {
+	/* V4L2 4cc associated with this control */
+	u32 id;
+	/* Number of frames of delay for this control */
+	u32 delay;
+	/* Value of the control in a circular buffer */
+	u32 value[MAX_CTRL_LIST];
+	/* Does this control need to be applied? */
+	bool updated[MAX_CTRL_LIST];
+	/* Current index into the control array */
+	u32 count;
+};
+
+/* Definition of a fixed embedded data buffer format in the case where
+ * the camera does not support embedded data.
+ */
+struct unicam_metadata {
+	u32	exposure;
+	u32	gain;
+};
+
+#define UNICAM_METADATA_SIZE	sizeof(struct unicam_metadata)
+
+struct unicam_pending_ctrls {
+	u32 value;
+	bool updated;
+};
+
 struct unicam_dmaqueue {
 	struct list_head	active;
 };
@@ -405,7 +466,6 @@ struct unicam_node {
 	/* Pointer to the parent handle */
 	struct unicam_device *dev;
 	struct media_pad pad;
-	struct v4l2_ctrl_handler ctrl_handler;
 	unsigned int embedded_lines;
 	/* Dummy buffer intended to dump unicam data
 	 * if we have no queued buffers to swap to.
@@ -452,6 +512,14 @@ struct unicam_device {
 	bool sensor_embedded_data;
 
 	struct unicam_node node[MAX_NODES];
+	struct unicam_ctrls ctrl[NUM_CTRLS];
+	struct unicam_pending_ctrls pending_ctrl[NUM_CTRLS];
+
+	struct unicam_metadata metadata;
+	struct v4l2_ctrl_handler ctrl_handler;
+	struct work_struct isr_work;
+	int group_hold;
+	bool use_staggered_writes;
 };
 
 /* Hardware access */
@@ -694,7 +762,7 @@ static void unicam_wr_dma_addr(struct unicam_device *dev, unsigned int dmaaddr,
 		    dmaaddr + dev->node[IMAGE_PAD].v_fmt.fmt.pix.sizeimage :
 		    dmaaddr + dev->node[METADATA_PAD].v_fmt.fmt.meta.buffersize;
 
-	unicam_dbg(1, dev, "wr_dma_addr pad:%d %08x-%08x\n", pad_id, dmaaddr,
+	unicam_dbg(2, dev, "wr_dma_addr pad:%d %08x-%08x\n", pad_id, dmaaddr,
 		   endaddr);
 
 	if (pad_id == IMAGE_PAD) {
@@ -755,8 +823,16 @@ static inline void unicam_schedule_dummy_buffer(struct unicam_node *node)
 static inline void unicam_process_buffer_complete(struct unicam_node *node,
 						  unsigned int sequence)
 {
+	struct unicam_device *dev = node->dev;
+	void *addr;
+
 	node->cur_frm->vb.field = node->m_fmt.field;
 	node->cur_frm->vb.sequence = sequence;
+
+	if (node->pad_id == METADATA_PAD && !dev->sensor_embedded_data) {
+		addr = vb2_plane_vaddr(&node->cur_frm->vb.vb2_buf, 0);
+		memcpy(addr, &dev->metadata, UNICAM_METADATA_SIZE);
+	}
 
 	vb2_buffer_done(&node->cur_frm->vb.vb2_buf, VB2_BUF_STATE_DONE);
 }
@@ -785,6 +861,73 @@ static int unicam_all_nodes_disabled(struct unicam_device *dev)
 	ret &= !dev->node[METADATA_PAD].open ||
 	       !dev->node[METADATA_PAD].streaming;
 	return ret;
+}
+
+/*
+ * This worker function is scheduled from the ISR below to perform
+ * synchronised I2C writes to the camera (if needed).
+ */
+static void unicam_post_isr_work(struct work_struct *w)
+{
+	struct unicam_device *unicam =
+		container_of(w, struct unicam_device, isr_work);
+	struct unicam_ctrls *c;
+	unsigned int max_delay, delay_diff, idx;
+	int ret, i;
+	int prev_count;
+
+	mutex_lock(unicam->ctrl_handler.lock);
+
+	/* Find the largest delay across all controls */
+	max_delay = 0;
+	for (i = 0; i < NUM_CTRLS; i++) {
+		c = &unicam->ctrl[i];
+		max_delay = max(max_delay, c->delay);
+	}
+
+	for (i = 0; i < NUM_CTRLS; i++) {
+		c = &unicam->ctrl[i];
+		/*
+		 * Check if the control need to be acted on, accounting for
+		 * the relative delays between all of them.
+		 */
+		delay_diff = max_delay - c->delay;
+		idx = (c->count - delay_diff) & (MAX_CTRL_LIST - 1);
+		if (c->updated[idx]) {
+			struct v4l2_control ctrl = { .id = c->id,
+						     .value = c->value[idx] };
+			unicam_dbg(3, unicam,
+				   "Setting sensor ctrl: %d, val:%d, frame %d",
+				   c->id, c->value[idx], unicam->sequence);
+			ret = v4l2_s_ctrl(NULL, unicam->sensor->ctrl_handler,
+					  &ctrl);
+			if (ret != 0)
+				unicam_info(unicam,
+					    "Error setting sensor ctrl:%d, val:%d",
+					    c->id, c->value[idx]);
+		}
+
+		/* Store the control values locally in case the
+		 * sensor does not provide any embedded data.
+		 */
+		idx = (c->count - max_delay) & (MAX_CTRL_LIST - 1);
+		switch (c->id) {
+		case V4L2_CID_EXPOSURE:
+			unicam->metadata.exposure = c->value[idx];
+			break;
+		case V4L2_CID_ANALOGUE_GAIN:
+			unicam->metadata.gain = c->value[idx];
+			break;
+		}
+
+		/* Advance the control history to the next frame */
+		prev_count = c->count;
+		c->count = (c->count + 1) & (MAX_CTRL_LIST - 1);
+		c->value[c->count] = c->value[prev_count];
+		c->updated[c->count] = false;
+	}
+
+	mutex_unlock(unicam->ctrl_handler.lock);
 }
 
 /*
@@ -868,6 +1011,11 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 			 */
 			unicam_schedule_dummy_buffer(&unicam->node[i]);
 		}
+		/*
+		 * Kick off the worker thread here to do any I2C writes
+		 * on the sensor if required.
+		 */
+		schedule_work(&unicam->isr_work);
 	}
 	/*
 	 * Cannot swap buffer at frame end, there may be a race condition
@@ -1402,7 +1550,8 @@ static void unicam_enable_ed(struct unicam_device *dev)
 	struct unicam_cfg *cfg = &dev->cfg;
 	u32 val = UNICAM_DCS;
 
-	set_field(&val, 2, UNICAM_EDL_MASK);
+	set_field(&val, dev->node[METADATA_PAD].embedded_lines,
+		  UNICAM_EDL_MASK);
 	/* Do not wrap at the end of the embedded data buffer */
 	set_field(&val, 0, UNICAM_DBOB);
 
@@ -1627,6 +1776,22 @@ static void unicam_disable(struct unicam_device *dev)
 	clk_write(cfg, 0);
 }
 
+static void unicam_initialise_ctrls(struct unicam_device *unicam)
+{
+	int i;
+
+	for (i = 0; i < NUM_CTRLS; i++) {
+		struct unicam_ctrls *c = &unicam->ctrl[i];
+
+		if (c->updated[c->count]) {
+			struct v4l2_control ctrl = { .id = c->id,
+					     .value = c->value[c->count] };
+			v4l2_s_ctrl(NULL, unicam->sensor->ctrl_handler, &ctrl);
+			c->updated[c->count] = 0;
+		}
+	}
+}
+
 static int unicam_start_streaming(struct vb2_queue *vq, unsigned int count)
 {
 	struct unicam_node *node = vb2_get_drv_priv(vq);
@@ -1642,6 +1807,13 @@ static int unicam_start_streaming(struct vb2_queue *vq, unsigned int count)
 		unicam_dbg(3, dev, "Not all nodes are streaming yet.");
 		return 0;
 	}
+
+	/*
+	 * If the application updated any controls before we get going we need
+	 * to send them now. This ensures exposure/gain get reported correctly
+	 * at startup even for sensors that don't supply metadata.
+	 */
+	unicam_initialise_ctrls(dev);
 
 	dev->sequence = 0;
 	ret = unicam_runtime_get(dev);
@@ -1669,7 +1841,7 @@ static int unicam_start_streaming(struct vb2_queue *vq, unsigned int count)
 			dev->active_data_lanes = dev->max_data_lanes;
 	}
 	if (dev->active_data_lanes > dev->max_data_lanes) {
-		unicam_err(dev,	"Device has requested %u data lanes, which is >%u configured in DT\n",
+		unicam_err(dev, "Device has requested %u data lanes, which is >%u configured in DT\n",
 			   dev->active_data_lanes, dev->max_data_lanes);
 		ret = -EINVAL;
 		goto err_pm_put;
@@ -2146,7 +2318,6 @@ static int unicam_release(struct file *file)
 	mutex_lock(&node->lock);
 
 	fh_singular = v4l2_fh_is_singular_file(file);
-
 	ret = _vb2_fop_release(file, NULL);
 
 	if (fh_singular)
@@ -2240,6 +2411,169 @@ unicam_async_bound(struct v4l2_async_notifier *notifier,
 	return 0;
 }
 
+static int unicam_set_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct unicam_device *unicam =
+		container_of(ctrl->handler, struct unicam_device, ctrl_handler);
+	struct unicam_ctrls *c;
+	struct unicam_pending_ctrls *p;
+	int ret = 0;
+	int i;
+
+	if (ctrl->id == V4L2_CID_USER_UNICAM_STAGGERED_WRITE) {
+		/* Allow use of unicam staggered writes on a FS event.
+		 * If this is disabled (default), we forward the ctrl directly
+		 * to the sensor subdevice.
+		 */
+		unicam->use_staggered_writes = ctrl->val;
+		return 0;
+	}
+
+	if (unicam->use_staggered_writes) {
+		if (ctrl->id == V4L2_CID_USER_UNICAM_GROUP_HOLD) {
+			unicam->group_hold = !!ctrl->val;
+
+			/* If the group hold has been released, apply the
+			 * pending ctrl values to the current ctrl list.
+			 */
+			if (unicam->group_hold == 0) {
+				for (i = 0; i < NUM_CTRLS; i++) {
+					c = &unicam->ctrl[i];
+					p = &unicam->pending_ctrl[i];
+					if (p->updated) {
+						c->value[c->count] = p->value;
+						c->updated[c->count] = true;
+						p->updated = false;
+					}
+				}
+			}
+		} else {
+			if (unicam->group_hold == 0) {
+				unicam_err(unicam,
+					   "Ctrl cannot be set without group hold lock.");
+				return -EINVAL;
+			}
+
+			for (i = 0; i < NUM_CTRLS; i++) {
+				p = &unicam->pending_ctrl[i];
+				if (ctrl->id == unicam->ctrl[i].id)
+					break;
+			}
+
+			/* This is not a recognised control */
+			if (i == NUM_CTRLS)
+				return -EINVAL;
+
+			/* Store the values in a pending list until the group
+			 * hold has been released.
+			 */
+			p->value = ctrl->val;
+			p->updated = true;
+		}
+	} else {
+		struct v4l2_control c = { .id = ctrl->id,
+					  .value = ctrl->val };
+		unicam_dbg(3, unicam,
+			   "Forwarding sensor ctrl: %d, val:%d, frame %d", c.id,
+			   c.value, unicam->sequence);
+		ret = v4l2_s_ctrl(NULL, unicam->sensor->ctrl_handler, &c);
+	}
+
+	return ret;
+}
+
+static const struct v4l2_ctrl_ops unicam_ctrl_ops = {
+	.s_ctrl = unicam_set_ctrl,
+};
+
+/* Returns false for any ctrls handled by this driver directly */
+static bool unicam_ctrl_filter(const struct v4l2_ctrl *ctrl)
+{
+	int i;
+
+	for (i = 0; i < NUM_CTRLS; i++) {
+		if (ctrl->id == unicam_ctrl_list[i].id)
+			return false;
+	}
+
+	return true;
+}
+
+static const struct v4l2_ctrl_config unicam_group_hold_ctrl = {
+	.ops		= &unicam_ctrl_ops,
+	.id		= V4L2_CID_USER_UNICAM_GROUP_HOLD,
+	.name		= "Group hold",
+	.type		= V4L2_CTRL_TYPE_INTEGER,
+	.def		= 0,
+	.min		= 0,
+	.max		= 1,
+	.step		= 1,
+	.flags		= V4L2_CTRL_FLAG_EXECUTE_ON_WRITE
+};
+
+static const struct v4l2_ctrl_config unicam_staggered_write_ctrl = {
+	.ops		= &unicam_ctrl_ops,
+	.id		= V4L2_CID_USER_UNICAM_STAGGERED_WRITE,
+	.name		= "Use staggered writes",
+	.type		= V4L2_CTRL_TYPE_BOOLEAN,
+	.def		= 0,
+	.min		= 0,
+	.max		= 1,
+	.step		= 1,
+	.flags		= V4L2_CTRL_FLAG_EXECUTE_ON_WRITE
+};
+
+static int unicam_register_ctrls(struct unicam_device *unicam)
+{
+	struct v4l2_ctrl *ctrl;
+	int ret;
+	int i;
+
+	ret = v4l2_ctrl_handler_init(&unicam->ctrl_handler, 16);
+	if (ret != 0)
+		return ret;
+
+	for (i = 0; i < NUM_CTRLS; i++) {
+		struct v4l2_query_ext_ctrl c;
+
+		/* Find the control handle in the subdevice driver to pull
+		 * out the min/max/default values.
+		 */
+		c.id = unicam_ctrl_list[i].id;
+		if (v4l2_query_ext_ctrl(unicam->sensor->ctrl_handler, &c))
+			continue;
+
+		unicam->ctrl[i].id = unicam_ctrl_list[i].id;
+		unicam->ctrl[i].delay = unicam_ctrl_list[i].delay;
+		ctrl = v4l2_ctrl_new_std(&unicam->ctrl_handler,
+					 &unicam_ctrl_ops,
+					 unicam_ctrl_list[i].id,
+					 c.minimum, c.maximum,
+					 c.step, c.default_value);
+		ctrl->flags |= V4L2_CTRL_FLAG_EXECUTE_ON_WRITE;
+	}
+
+	v4l2_ctrl_new_custom(&unicam->ctrl_handler, &unicam_group_hold_ctrl,
+			     NULL);
+	v4l2_ctrl_new_custom(&unicam->ctrl_handler,
+			     &unicam_staggered_write_ctrl, NULL);
+
+	/* Add controls from the subdevice, but filtering out any that
+	 * will be handled by this driver, i.e. the ones registered above.
+	 */
+	ret = v4l2_ctrl_add_handler(&unicam->ctrl_handler,
+				    unicam->sensor->ctrl_handler,
+				    &unicam_ctrl_filter, true);
+	if (ret != 0) {
+		v4l2_ctrl_handler_free(&unicam->ctrl_handler);
+		return ret;
+	}
+
+	/* Only the image node accepts controls passed to it. */
+	unicam->node[IMAGE_PAD].video_dev.ctrl_handler = &unicam->ctrl_handler;
+	return 0;
+}
+
 static int register_node(struct unicam_device *unicam, struct unicam_node *node,
 			 enum v4l2_buf_type type, int pad_id)
 {
@@ -2321,15 +2655,6 @@ static int register_node(struct unicam_device *unicam, struct unicam_node *node,
 	spin_lock_init(&node->dma_queue_lock);
 	mutex_init(&node->lock);
 
-	if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE) {
-		/* Add controls from the subdevice */
-		ret = v4l2_ctrl_add_handler(&node->ctrl_handler,
-					    unicam->sensor->ctrl_handler, NULL,
-					    true);
-		if (ret < 0)
-			return ret;
-	}
-
 	q = &node->buffer_queue;
 	q->type = type;
 	q->io_modes = VB2_MMAP | VB2_DMABUF | VB2_READ;
@@ -2365,10 +2690,6 @@ static int register_node(struct unicam_device *unicam, struct unicam_node *node,
 	/* Define the device names */
 	snprintf(vdev->name, sizeof(vdev->name), "%s-%s", UNICAM_MODULE_NAME,
 		 node->pad_id == IMAGE_PAD ? "image" : "embedded");
-
-	/* If the source has no controls then remove our ctrl handler. */
-	if (list_empty(&node->ctrl_handler.ctrls))
-		unicam->v4l2_dev.ctrl_handler = NULL;
 
 	video_set_drvdata(vdev, node);
 	vdev->entity.flags |= MEDIA_ENT_FL_DEFAULT;
@@ -2489,6 +2810,11 @@ static int unicam_probe_complete(struct unicam_device *unicam)
 		unicam_err(unicam, "Unable to register subdev nodes.\n");
 		goto unregister;
 	}
+
+	/* Register control handlers for unicam and the sensor */
+	ret = unicam_register_ctrls(unicam);
+	if (ret < 0)
+		goto unregister;
 
 	return 0;
 
@@ -2652,7 +2978,6 @@ static int unicam_probe(struct platform_device *pdev)
 {
 	struct unicam_cfg *unicam_cfg;
 	struct unicam_device *unicam;
-	struct v4l2_ctrl_handler *hdl;
 	struct resource	*res;
 	int ret;
 
@@ -2726,29 +3051,22 @@ static int unicam_probe(struct platform_device *pdev)
 		goto probe_out_v4l2_unregister;
 	}
 
-	/* Reserve space for the controls */
-	hdl = &unicam->node[IMAGE_PAD].ctrl_handler;
-	ret = v4l2_ctrl_handler_init(hdl, 16);
-	if (ret < 0)
-		goto media_unregister;
-	unicam->v4l2_dev.ctrl_handler = hdl;
-
 	/* set the driver data in platform device */
 	platform_set_drvdata(pdev, unicam);
 
 	ret = of_unicam_connect_subdevs(unicam);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to connect subdevs\n");
-		goto free_hdl;
+		goto media_unregister;
 	}
 
 	/* Enable the block power domain */
 	pm_runtime_enable(&pdev->dev);
 
+	INIT_WORK(&unicam->isr_work, unicam_post_isr_work);
+
 	return 0;
 
-free_hdl:
-	v4l2_ctrl_handler_free(hdl);
 media_unregister:
 	media_device_unregister(&unicam->mdev);
 probe_out_v4l2_unregister:
@@ -2768,7 +3086,7 @@ static int unicam_remove(struct platform_device *pdev)
 	pm_runtime_disable(&pdev->dev);
 
 	v4l2_async_notifier_unregister(&unicam->notifier);
-	v4l2_ctrl_handler_free(&unicam->node[IMAGE_PAD].ctrl_handler);
+	v4l2_ctrl_handler_free(&unicam->ctrl_handler);
 	v4l2_device_unregister(&unicam->v4l2_dev);
 	unregister_nodes(unicam);
 	if (unicam->sensor_config)
