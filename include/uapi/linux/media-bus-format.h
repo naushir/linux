@@ -144,6 +144,9 @@
 #define MEDIA_BUS_FMT_SGRBG16_1X16		0x301f
 #define MEDIA_BUS_FMT_SRGGB16_1X16		0x3020
 
+/* CSI2 Camera sensor embedded metadata - next is 0x4001 */
+#define MEDIA_BUS_FMT_CSI2_EMBEDDED_DATA	0x3021
+
 /* JPEG compressed formats - next is	0x4002 */
 #define MEDIA_BUS_FMT_JPEG_1X8			0x4001
 
