@@ -863,6 +863,20 @@ static int unicam_all_nodes_disabled(struct unicam_device *dev)
 	return ret;
 }
 
+static void unicam_ctrls_reset(struct unicam_device *dev)
+{
+	struct unicam_ctrls *c;
+	int i, j;
+
+	for (i = 0; i < NUM_CTRLS; i++) {
+		c = &dev->ctrl[i];
+		for (j = 0; j < MAX_CTRL_LIST; j++) {
+			c->value[j] = 0;
+			c->updated[j] = 0;
+		}
+	}
+}
+
 /*
  * This worker function is scheduled from the ISR below to perform
  * synchronised I2C writes to the camera (if needed).
@@ -2411,6 +2425,19 @@ unicam_async_bound(struct v4l2_async_notifier *notifier,
 	return 0;
 }
 
+static int unicam_update_delay(struct unicam_device *unicam, u32 id, int delay)
+{
+	int i;
+
+	for (i = 0; i < NUM_CTRLS; i++) {
+		if (unicam->ctrl[i].id == id) {
+			unicam->ctrl[i].delay = delay;
+			return 0;
+		}
+	}
+	return -EINVAL;
+}
+
 static int unicam_set_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct unicam_device *unicam =
@@ -2420,13 +2447,32 @@ static int unicam_set_ctrl(struct v4l2_ctrl *ctrl)
 	int ret = 0;
 	int i;
 
-	if (ctrl->id == V4L2_CID_USER_UNICAM_STAGGERED_WRITE) {
+	switch (ctrl->id) {
+	case V4L2_CID_USER_UNICAM_STAGGERED_WRITE:
 		/* Allow use of unicam staggered writes on a FS event.
 		 * If this is disabled (default), we forward the ctrl directly
 		 * to the sensor subdevice.
 		 */
 		unicam->use_staggered_writes = ctrl->val;
 		return 0;
+
+	case V4L2_CID_USER_UNICAM_EXPOSURE_DELAY:
+		/* Change the number of frames of delay we believe there
+		 * to be between updating exposure and it taking effect.
+		 */
+		return unicam_update_delay(unicam,
+			V4L2_CID_EXPOSURE, ctrl->val);
+
+	case V4L2_CID_USER_UNICAM_GAIN_DELAY:
+		/* Change the number of frames of delay we believe there
+		 * to be between updating analogue gain and it taking effect.
+		 */
+		return unicam_update_delay(unicam,
+			V4L2_CID_ANALOGUE_GAIN, ctrl->val);
+
+	default:
+		/* Fall through to code below this switch. */
+		break;
 	}
 
 	if (unicam->use_staggered_writes) {
@@ -2523,6 +2569,30 @@ static const struct v4l2_ctrl_config unicam_staggered_write_ctrl = {
 	.flags		= V4L2_CTRL_FLAG_EXECUTE_ON_WRITE
 };
 
+static const struct v4l2_ctrl_config unicam_exposure_delay_ctrl = {
+	.ops		= &unicam_ctrl_ops,
+	.id		= V4L2_CID_USER_UNICAM_EXPOSURE_DELAY,
+	.name		= "Exposure delay (in frames)",
+	.type		= V4L2_CTRL_TYPE_INTEGER,
+	.def		= 2,
+	.min		= 0,
+	.max		= 99,
+	.step		= 1,
+	.flags		= 0
+};
+
+static const struct v4l2_ctrl_config unicam_gain_delay_ctrl = {
+	.ops		= &unicam_ctrl_ops,
+	.id		= V4L2_CID_USER_UNICAM_GAIN_DELAY,
+	.name		= "Gain delay (in frames)",
+	.type		= V4L2_CTRL_TYPE_INTEGER,
+	.def		= 1,
+	.min		= 0,
+	.max		= 99,
+	.step		= 1,
+	.flags		= 0
+};
+
 static int unicam_register_ctrls(struct unicam_device *unicam)
 {
 	struct v4l2_ctrl *ctrl;
@@ -2557,6 +2627,10 @@ static int unicam_register_ctrls(struct unicam_device *unicam)
 			     NULL);
 	v4l2_ctrl_new_custom(&unicam->ctrl_handler,
 			     &unicam_staggered_write_ctrl, NULL);
+	v4l2_ctrl_new_custom(&unicam->ctrl_handler,
+			     &unicam_exposure_delay_ctrl, NULL);
+	v4l2_ctrl_new_custom(&unicam->ctrl_handler,
+			     &unicam_gain_delay_ctrl, NULL);
 
 	/* Add controls from the subdevice, but filtering out any that
 	 * will be handled by this driver, i.e. the ones registered above.
