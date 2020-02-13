@@ -2316,6 +2316,8 @@ static int unicam_open(struct file *file)
 		goto unlock;
 	}
 
+	unicam_ctrls_reset(dev);
+
 unlock:
 	mutex_unlock(&node->lock);
 	return ret;
