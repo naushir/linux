@@ -70,6 +70,7 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/videodev2.h>
+#include <linux/dma-mapping.h>
 
 #include <media/v4l2-common.h>
 #include <media/v4l2-ctrls.h>
@@ -121,6 +122,12 @@ MODULE_PARM_DESC(debug, "Debug level 0-3");
 #define MIN_HEIGHT	16
 /* Default size of the embedded buffer */
 #define UNICAM_EMBEDDED_SIZE	8192
+
+/*
+ * Size of the dummy buffer. Can be any size really, but the DMA
+ * allocation works in units of page sizes.
+ */
+#define DUMMY_BUF_SIZE	(PAGE_SIZE)
 
 enum pad_types {
 	IMAGE_PAD,
@@ -400,6 +407,11 @@ struct unicam_node {
 	struct media_pad pad;
 	struct v4l2_ctrl_handler ctrl_handler;
 	unsigned int embedded_lines;
+	/* Dummy buffer intended to dump unicam data
+	 * if we have no queued buffers to swap to.
+	 */
+	void *dummy_buf_cpu_addr;
+	dma_addr_t dummy_buf_dma_addr;
 };
 
 struct unicam_device {
@@ -699,6 +711,9 @@ static inline int unicam_get_lines_done(struct unicam_device *dev)
 	u32 start_addr, cur_addr;
 	u32 stride = dev->node[IMAGE_PAD].v_fmt.fmt.pix.bytesperline;
 
+	if (!dev->node[IMAGE_PAD].cur_frm)
+		return 0;
+
 	start_addr =
 	(u32)vb2_dma_contig_plane_dma_addr(&dev->node[IMAGE_PAD].cur_frm->vb.vb2_buf,
 					   0);
@@ -721,6 +736,22 @@ static inline void unicam_schedule_next_buffer(struct unicam_node *node)
 	unicam_wr_dma_addr(dev, addr, node->pad_id);
 }
 
+static inline void unicam_schedule_dummy_buffer(struct unicam_node *node)
+{
+	struct unicam_device *dev = node->dev;
+	dma_addr_t addr = node->dummy_buf_dma_addr;
+
+	if (node->pad_id == IMAGE_PAD) {
+		reg_write(&dev->cfg, UNICAM_IBSA0, addr);
+		reg_write(&dev->cfg, UNICAM_IBEA0, addr + DUMMY_BUF_SIZE);
+	} else {
+		reg_write(&dev->cfg, UNICAM_DBSA0, addr);
+		reg_write(&dev->cfg, UNICAM_DBEA0, addr + DUMMY_BUF_SIZE);
+	}
+
+	node->next_frm = NULL;
+}
+
 static inline void unicam_process_buffer_complete(struct unicam_node *node,
 						  unsigned int sequence)
 {
@@ -728,7 +759,6 @@ static inline void unicam_process_buffer_complete(struct unicam_node *node,
 	node->cur_frm->vb.sequence = sequence;
 
 	vb2_buffer_done(&node->cur_frm->vb.vb2_buf, VB2_BUF_STATE_DONE);
-	node->cur_frm = node->next_frm;
 }
 
 static int unicam_num_nodes_streaming(struct unicam_device *dev)
@@ -799,6 +829,28 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 	unicam_dbg(3, unicam, "ISR: ISTA: 0x%X, STA: 0x%X, lines_done: %d, sequence %d",
 		   ista, sta, lines_done, sequence);
 
+	/*
+	 * We must run the frame end handler first. If we have a valid next_frm
+	 * and we get a simultaneout FE + FS interrupt, running the FS handler
+	 * first would null out the next_frm ptr and we would have lost the
+	 * buffer forever.
+	 */
+	if (ista & UNICAM_FEI || sta & UNICAM_PI0) {
+		/*
+		 * Ensure we have swapped buffers already as we can't
+		 * stop the peripheral. If no buffer is available, use a
+		 * dummy buffer to dump out frames until we get a new buffer
+		 * to use.
+		 */
+		for (i = 0; i < num_nodes_streaming; i++) {
+			if (unicam->node[i].cur_frm)
+				unicam_process_buffer_complete(&unicam->node[i],
+							       sequence);
+			unicam->node[i].cur_frm = unicam->node[i].next_frm;
+		}
+		unicam->sequence++;
+	}
+
 	if (ista & UNICAM_FSI) {
 		/*
 		 * Timestamp is to be when the first data byte was captured,
@@ -809,24 +861,16 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 			if (unicam->node[i].cur_frm)
 				unicam->node[i].cur_frm->vb.vb2_buf.timestamp =
 								ts;
+			/*
+			 * Set the next frame output to go to a dummy frame
+			 * if we have not managed to obtain another frame
+			 * from the queue.
+			 */
+			unicam_schedule_dummy_buffer(&unicam->node[i]);
 		}
 	}
-	if (ista & UNICAM_FEI || sta & UNICAM_PI0) {
-		/*
-		 * Ensure we have swapped buffers already as we can't
-		 * stop the peripheral. Overwrite the frame we've just
-		 * captured instead.
-		 */
-		for (i = 0; i < num_nodes_streaming; i++) {
-			if (unicam->node[i].cur_frm &&
-			    unicam->node[i].cur_frm != unicam->node[i].next_frm)
-				unicam_process_buffer_complete(&unicam->node[i],
-							       sequence);
-		}
-		unicam->sequence++;
-	}
-
-	/* Cannot swap buffer at frame end, there may be a race condition
+	/*
+	 * Cannot swap buffer at frame end, there may be a race condition
 	 * where the HW does not actually swap it if the new frame has
 	 * already started.
 	 */
@@ -834,7 +878,7 @@ static irqreturn_t unicam_isr(int irq, void *dev)
 		for (i = 0; i < num_nodes_streaming; i++) {
 			spin_lock(&unicam->node[i].dma_queue_lock);
 			if (!list_empty(&unicam->node[i].dma_queue.active) &&
-			    unicam->node[i].cur_frm == unicam->node[i].next_frm)
+			    !unicam->node[i].next_frm)
 				unicam_schedule_next_buffer(&unicam->node[i]);
 			spin_unlock(&unicam->node[i].dma_queue_lock);
 		}
@@ -1430,7 +1474,7 @@ static void unicam_start_rx(struct unicam_device *dev, unsigned long *addr)
 	reg_write_field(cfg, UNICAM_ANA, 0, UNICAM_DDL);
 
 	/* Always start in trigger frame capture mode (UNICAM_FCM set) */
-	val = UNICAM_FSIE | UNICAM_FEIE | UNICAM_FCM;
+	val = UNICAM_FSIE | UNICAM_FEIE | UNICAM_FCM | UNICAM_IBOB;
 	set_field(&val,  line_int_freq, UNICAM_LCIE_MASK);
 	reg_write(cfg, UNICAM_ICTL, val);
 	reg_write(cfg, UNICAM_STA, UNICAM_STA_MASK_ALL);
@@ -2334,6 +2378,16 @@ static int register_node(struct unicam_device *unicam, struct unicam_node *node,
 		unicam_err(unicam, "Unable to register video device.\n");
 		return ret;
 	}
+
+	node->dummy_buf_cpu_addr = dma_alloc_coherent(&unicam->pdev->dev,
+						      DUMMY_BUF_SIZE,
+						      &node->dummy_buf_dma_addr,
+						      GFP_ATOMIC);
+	if (!node->dummy_buf_cpu_addr) {
+		unicam_err(unicam, "Unable to allocate dummy buffer.\n");
+		return -ENOMEM;
+	}
+
 	node->registered = 1;
 
 	if (node->pad_id == METADATA_PAD ||
@@ -2384,13 +2438,21 @@ static int register_node(struct unicam_device *unicam, struct unicam_node *node,
 
 static void unregister_nodes(struct unicam_device *unicam)
 {
-	if (unicam->node[IMAGE_PAD].registered) {
-		video_unregister_device(&unicam->node[IMAGE_PAD].video_dev);
-		unicam->node[IMAGE_PAD].registered = 0;
-	}
-	if (unicam->node[METADATA_PAD].registered) {
-		video_unregister_device(&unicam->node[METADATA_PAD].video_dev);
-		unicam->node[METADATA_PAD].registered = 0;
+	struct unicam_node *node;
+	int i;
+
+	for (i = 0; i < MAX_NODES; i++) {
+		node = &unicam->node[i];
+		if (node->registered) {
+			if (node->dummy_buf_cpu_addr) {
+				dma_free_coherent(&unicam->pdev->dev,
+						  DUMMY_BUF_SIZE,
+						  node->dummy_buf_cpu_addr,
+						  node->dummy_buf_dma_addr);
+			}
+			video_unregister_device(&node->video_dev);
+			node->registered = 0;
+		}
 	}
 }
 
