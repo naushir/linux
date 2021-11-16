@@ -26,13 +26,19 @@
 #include "bcm2835-isp-ctrls.h"
 #include "bcm2835-isp-fmts.h"
 
+/*
+ * We want to instantiate 2 independent instances allowing 2 simultaneous users
+ * of the ISP hardware.
+ */
+#define BCM2835_ISP_NUM_INSTANCES 2
+
 static unsigned int debug;
 module_param(debug, uint, 0644);
 MODULE_PARM_DESC(debug, "activates debug info");
 
-static unsigned int video_nr = 13;
-module_param(video_nr, uint, 0644);
-MODULE_PARM_DESC(video_nr, "base video device number");
+static unsigned int video_nr[BCM2835_ISP_NUM_INSTANCES] = { 13, 20 };
+module_param_array(video_nr, uint, NULL, 0644);
+MODULE_PARM_DESC(video_nr, "base video device numbers");
 
 #define BCM2835_ISP_NAME "bcm2835-isp"
 #define BCM2835_ISP_ENTITY_NAME_LEN 32
@@ -1279,6 +1285,7 @@ static int bcm2835_isp_get_supported_fmts(struct bcm2835_isp_node *node)
  * or output nodes.
  */
 static int register_node(struct bcm2835_isp_dev *dev,
+			 unsigned int instance,
 			 struct bcm2835_isp_node *node,
 			 int index)
 {
@@ -1436,10 +1443,10 @@ static int register_node(struct bcm2835_isp_dev *dev,
 	}
 
 	/* Define the device names */
-	snprintf(vfd->name, sizeof(node->vfd.name), "%s-%s%d", BCM2835_ISP_NAME,
-		 node->name, node->id);
+	snprintf(vfd->name, sizeof(node->vfd.name), "%s-%s%d",
+		 BCM2835_ISP_NAME, node->name, node->id);
 
-	ret = video_register_device(vfd, VFL_TYPE_VIDEO, video_nr + index);
+	ret = video_register_device(vfd, VFL_TYPE_VIDEO, video_nr[instance]);
 	if (ret) {
 		v4l2_err(&dev->v4l2_dev,
 			 "Failed to register video %s[%d] device node\n",
@@ -1546,7 +1553,7 @@ static int media_controller_register_node(struct bcm2835_isp_dev *dev, int num)
 		ret = -ENOMEM;
 		goto error_no_mem;
 	}
-	snprintf(name, BCM2835_ISP_ENTITY_NAME_LEN, "%s0-%s%d",
+	snprintf(name, BCM2835_ISP_ENTITY_NAME_LEN, "%s-%s%d",
 		 BCM2835_ISP_NAME, output ? "output" : "capture", num);
 	entity->name = name;
 	node->pad.flags = output ? MEDIA_PAD_FL_SOURCE : MEDIA_PAD_FL_SINK;
@@ -1605,7 +1612,8 @@ error_no_mem:
 	return ret;
 }
 
-static int media_controller_register(struct bcm2835_isp_dev *dev)
+static int media_controller_register(struct bcm2835_isp_dev *dev,
+				     unsigned int instance)
 {
 	char *name;
 	unsigned int i;
@@ -1627,7 +1635,7 @@ static int media_controller_register(struct bcm2835_isp_dev *dev)
 		ret = -ENOMEM;
 		goto done;
 	}
-	snprintf(name, BCM2835_ISP_ENTITY_NAME_LEN, "bcm2835_isp0");
+	snprintf(name, BCM2835_ISP_ENTITY_NAME_LEN, BCM2835_ISP_NAME);
 	dev->entity.name = name;
 	dev->entity.obj_type = MEDIA_ENTITY_TYPE_BASE;
 	dev->entity.function = MEDIA_ENT_F_PROC_VIDEO_SCALER;
@@ -1660,9 +1668,8 @@ done:
 	return ret;
 }
 
-static int bcm2835_isp_remove(struct platform_device *pdev)
+static void bcm2835_isp_remove_instance(struct bcm2835_isp_dev *dev)
 {
-	struct bcm2835_isp_dev *dev = platform_get_drvdata(pdev);
 	unsigned int i;
 
 	media_controller_unregister(dev);
@@ -1677,11 +1684,11 @@ static int bcm2835_isp_remove(struct platform_device *pdev)
 					      dev->component);
 
 	vchiq_mmal_finalise(dev->mmal_instance);
-
-	return 0;
 }
 
-static int bcm2835_isp_probe(struct platform_device *pdev)
+static int bcm2835_isp_probe_instance(struct platform_device *pdev,
+				      struct bcm2835_isp_dev **dev_int,
+				      unsigned int instance)
 {
 	struct bcm2835_isp_dev *dev;
 	unsigned int i;
@@ -1708,7 +1715,7 @@ static int bcm2835_isp_probe(struct platform_device *pdev)
 	if (ret) {
 		v4l2_err(&dev->v4l2_dev,
 			 "%s: failed to create ril.isp component\n", __func__);
-		goto error;
+		return ret;
 	}
 
 	if (dev->component->inputs < BCM2835_ISP_NUM_OUTPUTS ||
@@ -1720,7 +1727,7 @@ static int bcm2835_isp_probe(struct platform_device *pdev)
 			  BCM2835_ISP_NUM_OUTPUTS,
 			  dev->component->outputs,
 			  BCM2835_ISP_NUM_CAPTURES + BCM2835_ISP_NUM_METADATA);
-		goto error;
+		return -EINVAL;
 	}
 
 	atomic_set(&dev->num_streaming, 0);
@@ -1728,17 +1735,55 @@ static int bcm2835_isp_probe(struct platform_device *pdev)
 	for (i = 0; i < BCM2835_ISP_NUM_NODES; i++) {
 		struct bcm2835_isp_node *node = &dev->node[i];
 
-		ret = register_node(dev, node, i);
+		ret = register_node(dev, instance, node, i);
+		if (ret)
+			return ret;
+	}
+
+	ret = media_controller_register(dev, instance);
+	if (ret)
+		return ret;
+
+	*dev_int = dev;
+	return 0;
+}
+
+static int bcm2835_isp_remove(struct platform_device *pdev)
+{
+	struct bcm2835_isp_dev **bcm2835_isp_instances;
+	unsigned int i;
+
+	bcm2835_isp_instances = platform_get_drvdata(pdev);
+	for (i = 0; i < BCM2835_ISP_NUM_INSTANCES; i++) {
+		if (bcm2835_isp_instances[i])
+			bcm2835_isp_remove_instance(bcm2835_isp_instances[i]);
+	}
+
+	return 0;
+}
+
+static int bcm2835_isp_probe(struct platform_device *pdev)
+{
+	struct bcm2835_isp_dev **bcm2835_isp_instances;
+	unsigned int i;
+	int ret;
+
+	bcm2835_isp_instances = devm_kzalloc(&pdev->dev,
+					     sizeof(bcm2835_isp_instances) *
+						      BCM2835_ISP_NUM_INSTANCES,
+					     GFP_KERNEL);
+	if (!bcm2835_isp_instances)
+		return -ENOMEM;
+
+	for (i = 0; i < BCM2835_ISP_NUM_INSTANCES; i++) {
+		ret = bcm2835_isp_probe_instance(pdev,
+						 &bcm2835_isp_instances[i], i);
 		if (ret)
 			goto error;
 	}
 
-	ret = media_controller_register(dev);
-	if (ret)
-		goto error;
-
-	platform_set_drvdata(pdev, dev);
-	v4l2_info(&dev->v4l2_dev, "Loaded V4L2 %s\n", BCM2835_ISP_NAME);
+	platform_set_drvdata(pdev, bcm2835_isp_instances);
+	dev_info(&pdev->dev, "Loaded V4L2 %s\n", BCM2835_ISP_NAME);
 	return 0;
 
 error:
