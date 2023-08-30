@@ -1639,6 +1639,12 @@ static int camss_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	ret = camss_configure_pd(camss);
+	if (ret < 0) {
+		dev_err(dev, "Failed to configure power domains: %d\n", ret);
+		goto err_cleanup;
+	}
+
 	ret = camss_init_subdevices(camss);
 	if (ret < 0)
 		goto err_genpd_cleanup;
