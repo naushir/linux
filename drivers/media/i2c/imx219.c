@@ -362,9 +362,6 @@ struct imx219 {
 	struct v4l2_ctrl *vblank;
 	struct v4l2_ctrl *hblank;
 
-	/* Current mode */
-	const struct imx219_mode *mode;
-
 	/* Two or Four lanes */
 	u8 lanes;
 };
@@ -673,47 +670,29 @@ static int imx219_set_pad_format(struct v4l2_subdev *sd,
 		*format = fmt->format;
 		*crop = mode->crop;
 
-		if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
-			u32 prev_hts = imx219->mode->width + imx219->hblank->val;
-
-			imx219->mode = mode;
-			/* Update limits and set FPS to default */
-			__v4l2_ctrl_modify_range(imx219->vblank, IMX219_VBLANK_MIN,
-						 IMX219_VTS_MAX - mode->height, 1,
-						 mode->vts_def - mode->height);
-			__v4l2_ctrl_s_ctrl(imx219->vblank,
-					   mode->vts_def - mode->height);
-			/* Update max exposure while meeting expected vblanking */
-			exposure_max = mode->vts_def - 4;
-			exposure_def = (exposure_max < IMX219_EXPOSURE_DEFAULT) ?
-				exposure_max : IMX219_EXPOSURE_DEFAULT;
-			__v4l2_ctrl_modify_range(imx219->exposure,
-						 imx219->exposure->minimum,
-						 exposure_max, imx219->exposure->step,
-						 exposure_def);
-			/*
-			 * Retain PPL setting from previous mode so that the
-			 * line time does not change on a mode change.
-			 * Limits have to be recomputed as the controls define
-			 * the blanking only, so PPL values need to have the
-			 * mode width subtracted.
-			 */
-			hblank = prev_hts - mode->width;
-			__v4l2_ctrl_modify_range(imx219->hblank,
-						 IMX219_PPL_MIN - mode->width,
-						 IMX219_PPL_MAX - mode->width,
-						 1, IMX219_PPL_MIN - mode->width);
-			__v4l2_ctrl_s_ctrl(imx219->hblank, hblank);
-
-			/* Scale the pixel rate based on the mode specific factor */
-			pixel_rate = imx219_get_pixel_rate(imx219, &fmt->format);
-			__v4l2_ctrl_modify_range(imx219->pixel_rate, pixel_rate,
-						 pixel_rate, 1, pixel_rate);
-		}
-	} else {
-		format = v4l2_subdev_get_pad_format(sd, sd_state, 1);
-		/* Don't allow the embedded data format to be changed */
-		fmt->format = *format;
+	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
+		/* Update limits and set FPS to default */
+		__v4l2_ctrl_modify_range(imx219->vblank, IMX219_VBLANK_MIN,
+					 IMX219_VTS_MAX - mode->height, 1,
+					 mode->vts_def - mode->height);
+		__v4l2_ctrl_s_ctrl(imx219->vblank,
+				   mode->vts_def - mode->height);
+		/* Update max exposure while meeting expected vblanking */
+		exposure_max = mode->vts_def - 4;
+		exposure_def = (exposure_max < IMX219_EXPOSURE_DEFAULT) ?
+			exposure_max : IMX219_EXPOSURE_DEFAULT;
+		__v4l2_ctrl_modify_range(imx219->exposure,
+					 imx219->exposure->minimum,
+					 exposure_max, imx219->exposure->step,
+					 exposure_def);
+		/*
+		 * Currently PPL is fixed to IMX219_PPL_DEFAULT, so hblank
+		 * depends on mode->width only, and is not changeble in any
+		 * way other than changing the mode.
+		 */
+		hblank = IMX219_PPL_DEFAULT - mode->width;
+		__v4l2_ctrl_modify_range(imx219->hblank, hblank, hblank, 1,
+					 hblank);
 	}
 
 	return 0;
@@ -1029,8 +1008,8 @@ static const struct v4l2_subdev_ops imx219_subdev_ops = {
 static int imx219_init_controls(struct imx219 *imx219)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(&imx219->sd);
+	const struct imx219_mode *mode = &supported_modes[0];
 	struct v4l2_ctrl_handler *ctrl_hdlr;
-	unsigned int height = imx219->mode->height;
 	struct v4l2_fwnode_device_properties props;
 	int exposure_max, exposure_def, hblank, pixel_rate;
 	int i, ret;
@@ -1059,14 +1038,16 @@ static int imx219_init_controls(struct imx219 *imx219)
 	/* Initial vblank/hblank/exposure parameters based on current mode */
 	imx219->vblank = v4l2_ctrl_new_std(ctrl_hdlr, &imx219_ctrl_ops,
 					   V4L2_CID_VBLANK, IMX219_VBLANK_MIN,
-					   IMX219_VTS_MAX - height, 1,
-					   imx219->mode->vts_def - height);
-	hblank = IMX219_PPL_MIN - imx219->mode->width;
+					   IMX219_VTS_MAX - mode->height, 1,
+					   mode->vts_def - mode->height);
+	hblank = IMX219_PPL_DEFAULT - mode->width;
 	imx219->hblank = v4l2_ctrl_new_std(ctrl_hdlr, &imx219_ctrl_ops,
 					   V4L2_CID_HBLANK, hblank,
 					   IMX219_PPL_MIN - imx219->mode->width,
 					   1, hblank);
-	exposure_max = imx219->mode->vts_def - 4;
+	if (imx219->hblank)
+		imx219->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+	exposure_max = mode->vts_def - 4;
 	exposure_def = (exposure_max < IMX219_EXPOSURE_DEFAULT) ?
 		exposure_max : IMX219_EXPOSURE_DEFAULT;
 	imx219->exposure = v4l2_ctrl_new_std(ctrl_hdlr, &imx219_ctrl_ops,
@@ -1253,10 +1234,8 @@ static int imx219_probe(struct i2c_client *client)
 	if (ret)
 		goto error_power_off;
 
-	/* Set default mode to max resolution */
-	imx219->mode = &supported_modes[0];
-
-	/* sensor doesn't enter LP-11 state upon power up until and unless
+	/*
+	 * Sensor doesn't enter LP-11 state upon power up until and unless
 	 * streaming is started, so upon power up switch the modes to:
 	 * streaming -> standby
 	 */
