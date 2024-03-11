@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * PiSP Front End driver.
- * Copyright (c) 2021 Raspberry Pi Ltd.
+ * PiSP Front End Driver
  *
+ * Copyright (c) 2021-2024 Raspberry Pi Ltd.
  */
 
 #include <linux/bitops.h>
@@ -13,8 +13,10 @@
 
 #include <media/videobuf2-dma-contig.h>
 
-#include "pisp_fe.h"
 #include "cfe.h"
+#include "pisp-fe.h"
+
+#include "cfe-trace.h"
 
 #define FE_VERSION		0x000
 #define FE_CONTROL		0x004
@@ -114,13 +116,7 @@ static const struct pisp_fe_config_param pisp_fe_config_map[] = {
 					sizeof(struct pisp_fe_output_config)         },
 };
 
-#define pisp_fe_dbg_verbose(fmt, arg...)                        \
-	do {                                                    \
-		if (cfe_debug_verbose)                          \
-			dev_dbg(fe->v4l2_dev->dev, fmt, ##arg); \
-	} while (0)
 #define pisp_fe_dbg(fmt, arg...) dev_dbg(fe->v4l2_dev->dev, fmt, ##arg)
-#define pisp_fe_info(fmt, arg...) dev_info(fe->v4l2_dev->dev, fmt, ##arg)
 #define pisp_fe_err(fmt, arg...) dev_err(fe->v4l2_dev->dev, fmt, ##arg)
 
 static inline u32 pisp_fe_reg_read(struct pisp_fe_device *fe, u32 offset)
@@ -132,14 +128,12 @@ static inline void pisp_fe_reg_write(struct pisp_fe_device *fe, u32 offset,
 				     u32 val)
 {
 	writel(val, fe->base + offset);
-	pisp_fe_dbg_verbose("fe: write 0x%04x -> 0x%03x\n", val, offset);
 }
 
-static inline void pisp_fe_reg_write_relaxed(struct pisp_fe_device *fe, u32 offset,
-					     u32 val)
+static inline void pisp_fe_reg_write_relaxed(struct pisp_fe_device *fe,
+					     u32 offset, u32 val)
 {
 	writel_relaxed(val, fe->base + offset);
-	pisp_fe_dbg_verbose("fe: write 0x%04x -> 0x%03x\n", val, offset);
 }
 
 static int pisp_regs_show(struct seq_file *s, void *data)
@@ -173,19 +167,18 @@ DEFINE_SHOW_ATTRIBUTE(pisp_regs);
 
 static void pisp_config_write(struct pisp_fe_device *fe,
 			      struct pisp_fe_config *config,
-			      unsigned int start_offset,
-			      unsigned int size)
+			      unsigned int start_offset, unsigned int size)
 {
 	const unsigned int max_offset =
 		offsetof(struct pisp_fe_config, ch[PISP_FE_NUM_OUTPUTS]);
-	unsigned int i, end_offset;
+	unsigned int end_offset;
 	u32 *cfg = (u32 *)config;
 
 	start_offset = min(start_offset, max_offset);
 	end_offset = min(start_offset + size, max_offset);
 
 	cfg += start_offset >> 2;
-	for (i = start_offset; i < end_offset; i += 4, cfg++)
+	for (unsigned int i = start_offset; i < end_offset; i += 4, cfg++)
 		pisp_fe_reg_write_relaxed(fe, PISP_FE_CONFIG_BASE_OFFSET + i,
 					  *cfg);
 }
@@ -193,7 +186,6 @@ static void pisp_config_write(struct pisp_fe_device *fe,
 void pisp_fe_isr(struct pisp_fe_device *fe, bool *sof, bool *eof)
 {
 	u32 status, int_status, out_status, frame_status, error_status;
-	unsigned int i;
 
 	pisp_fe_reg_write(fe, FE_CONTROL, FE_CONTROL_LATCH_REGS);
 	status = pisp_fe_reg_read(fe, FE_STATUS);
@@ -204,12 +196,11 @@ void pisp_fe_isr(struct pisp_fe_device *fe, bool *sof, bool *eof)
 	int_status = pisp_fe_reg_read(fe, FE_INT_STATUS);
 	pisp_fe_reg_write(fe, FE_INT_STATUS, int_status);
 
-	pisp_fe_dbg_verbose("%s: status 0x%x out 0x%x frame 0x%x error 0x%x int 0x%x\n",
-		__func__, status, out_status, frame_status, error_status,
-		int_status);
+	trace_fe_irq(status, out_status, frame_status, error_status,
+		     int_status);
 
 	/* We do not report interrupts for the input/stream pad. */
-	for (i = 0; i < FE_NUM_PADS - 1; i++) {
+	for (unsigned int i = 0; i < FE_NUM_PADS - 1; i++) {
 		sof[i] = !!(int_status & FE_INT_SOF);
 		eof[i] = !!(int_status & FE_INT_EOF);
 	}
@@ -236,8 +227,7 @@ static bool pisp_fe_validate_output(struct pisp_fe_config const *cfg,
 	if ((cfg->global.enables & PISP_FE_ENABLE_CROP(c)) &&
 	    ((cfg->ch[c].crop.offset_x >= (cfg->input.format.width & ~1) ||
 	      cfg->ch[c].crop.offset_y >= cfg->input.format.height ||
-	      cfg->ch[c].crop.width < 2 ||
-	      cfg->ch[c].crop.height < 2)))
+	      cfg->ch[c].crop.width < 2 || cfg->ch[c].crop.height < 2)))
 		return false;
 
 	if ((cfg->global.enables & PISP_FE_ENABLE_DOWNSCALE(c)) &&
@@ -254,8 +244,7 @@ static bool pisp_fe_validate_stats(struct pisp_fe_config const *cfg)
 	return (!(cfg->global.enables & PISP_FE_ENABLE_STATS_CROP) ||
 		(cfg->stats_crop.offset_x < (cfg->input.format.width & ~1) &&
 		 cfg->stats_crop.offset_y < cfg->input.format.height &&
-		 cfg->stats_crop.width >= 2 &&
-		 cfg->stats_crop.height >= 2));
+		 cfg->stats_crop.width >= 2 && cfg->stats_crop.height >= 2));
 }
 
 int pisp_fe_validate_config(struct pisp_fe_device *fe,
@@ -263,8 +252,6 @@ int pisp_fe_validate_config(struct pisp_fe_device *fe,
 			    struct v4l2_format const *f0,
 			    struct v4l2_format const *f1)
 {
-	unsigned int i;
-
 	/*
 	 * Check the input is enabled, streaming and has nonzero size;
 	 * to avoid cases where the hardware might lock up or try to
@@ -277,7 +264,7 @@ int pisp_fe_validate_config(struct pisp_fe_device *fe,
 		return -EINVAL;
 	}
 
-	for (i = 0; i < PISP_FE_NUM_OUTPUTS; i++) {
+	for (unsigned int i = 0; i < PISP_FE_NUM_OUTPUTS; i++) {
 		if (!(cfg->global.enables & PISP_FE_ENABLE_OUTPUT(i))) {
 			if (cfg->global.enables &
 					PISP_FE_ENABLE_OUTPUT_CLUSTER(i)) {
@@ -304,7 +291,6 @@ int pisp_fe_validate_config(struct pisp_fe_device *fe,
 void pisp_fe_submit_job(struct pisp_fe_device *fe, struct vb2_buffer **vb2_bufs,
 			struct pisp_fe_config *cfg)
 {
-	unsigned int i;
 	u64 addr;
 	u32 status;
 
@@ -312,7 +298,7 @@ void pisp_fe_submit_job(struct pisp_fe_device *fe, struct vb2_buffer **vb2_bufs,
 	 * Check output buffers exist and outputs are correctly configured.
 	 * If valid, set the buffer's DMA address; otherwise disable.
 	 */
-	for (i = 0; i < PISP_FE_NUM_OUTPUTS; i++) {
+	for (unsigned int i = 0; i < PISP_FE_NUM_OUTPUTS; i++) {
 		struct vb2_buffer *buf = vb2_bufs[FE_OUTPUT0_PAD + i];
 
 		if (!(cfg->global.enables & PISP_FE_ENABLE_OUTPUT(i)))
@@ -341,7 +327,6 @@ void pisp_fe_submit_job(struct pisp_fe_device *fe, struct vb2_buffer **vb2_bufs,
 	 * sequence of relaxed writes which follow.
 	 */
 	status = pisp_fe_reg_read(fe, FE_STATUS);
-	pisp_fe_dbg_verbose("%s: status = 0x%x\n", __func__, status);
 	if (WARN_ON(status & FE_STATUS_QUEUED))
 		return;
 
@@ -359,7 +344,7 @@ void pisp_fe_submit_job(struct pisp_fe_device *fe, struct vb2_buffer **vb2_bufs,
 			     (PISP_FE_ENABLE_STATS_CROP        |
 			      PISP_FE_ENABLE_OUTPUT_CLUSTER(0) |
 			      PISP_FE_ENABLE_OUTPUT_CLUSTER(1)));
-	for (i = 0; i < ARRAY_SIZE(pisp_fe_config_map); i++) {
+	for (unsigned int i = 0; i < ARRAY_SIZE(pisp_fe_config_map); i++) {
 		const struct pisp_fe_config_param *p = &pisp_fe_config_map[i];
 
 		if (cfg->dirty_flags & p->dirty_flags ||
@@ -388,28 +373,28 @@ void pisp_fe_stop(struct pisp_fe_device *fe)
 	pisp_fe_reg_write(fe, FE_INT_STATUS, ~0);
 }
 
-static int pisp_fe_init_cfg(struct v4l2_subdev *sd,
-			    struct v4l2_subdev_state *state)
+static int pisp_fe_init_state(struct v4l2_subdev *sd,
+			      struct v4l2_subdev_state *state)
 {
 	struct v4l2_mbus_framefmt *fmt;
 
-	fmt = v4l2_subdev_get_pad_format(sd, state, FE_STREAM_PAD);
+	fmt = v4l2_subdev_state_get_format(state, FE_STREAM_PAD);
 	*fmt = cfe_default_format;
 	fmt->code = MEDIA_BUS_FMT_SRGGB16_1X16;
 
-	fmt = v4l2_subdev_get_pad_format(sd, state, FE_CONFIG_PAD);
+	fmt = v4l2_subdev_state_get_format(state, FE_CONFIG_PAD);
 	*fmt = cfe_default_meta_format;
 	fmt->code = MEDIA_BUS_FMT_FIXED;
 
-	fmt = v4l2_subdev_get_pad_format(sd, state, FE_OUTPUT0_PAD);
+	fmt = v4l2_subdev_state_get_format(state, FE_OUTPUT0_PAD);
 	*fmt = cfe_default_format;
 	fmt->code = MEDIA_BUS_FMT_SRGGB16_1X16;
 
-	fmt = v4l2_subdev_get_pad_format(sd, state, FE_OUTPUT1_PAD);
+	fmt = v4l2_subdev_state_get_format(state, FE_OUTPUT1_PAD);
 	*fmt = cfe_default_format;
 	fmt->code = MEDIA_BUS_FMT_SRGGB16_1X16;
 
-	fmt = v4l2_subdev_get_pad_format(sd, state, FE_STATS_PAD);
+	fmt = v4l2_subdev_state_get_format(state, FE_STATS_PAD);
 	*fmt = cfe_default_meta_format;
 	fmt->code = MEDIA_BUS_FMT_FIXED;
 
@@ -435,13 +420,13 @@ static int pisp_fe_pad_set_fmt(struct v4l2_subdev *sd,
 		format->format.code = cfe_fmt->code;
 		format->format.field = V4L2_FIELD_NONE;
 
-		fmt = v4l2_subdev_get_pad_format(sd, state, FE_STREAM_PAD);
+		fmt = v4l2_subdev_state_get_format(state, FE_STREAM_PAD);
 		*fmt = format->format;
 
-		fmt = v4l2_subdev_get_pad_format(sd, state, FE_OUTPUT0_PAD);
+		fmt = v4l2_subdev_state_get_format(state, FE_OUTPUT0_PAD);
 		*fmt = format->format;
 
-		fmt = v4l2_subdev_get_pad_format(sd, state, FE_OUTPUT1_PAD);
+		fmt = v4l2_subdev_state_get_format(state, FE_OUTPUT1_PAD);
 		*fmt = format->format;
 
 		return 0;
@@ -456,11 +441,17 @@ static int pisp_fe_pad_set_fmt(struct v4l2_subdev *sd,
 		u32 sink_code;
 		u32 code;
 
-		sink_fmt = v4l2_subdev_get_pad_format(sd, state, FE_STREAM_PAD);
+		cfe_fmt = find_format_by_code(format->format.code);
+		if (!cfe_fmt || !(cfe_fmt->flags & CFE_FORMAT_FLAG_FE_OUT))
+			cfe_fmt = find_format_by_code(MEDIA_BUS_FMT_SRGGB16_1X16);
+
+		format->format.code = cfe_fmt->code;
+
+		sink_fmt = v4l2_subdev_state_get_format(state, FE_STREAM_PAD);
 		if (!sink_fmt)
 			return -EINVAL;
 
-		source_fmt = v4l2_subdev_get_pad_format(sd, state, format->pad);
+		source_fmt = v4l2_subdev_state_get_format(state, format->pad);
 		if (!source_fmt)
 			return -EINVAL;
 
@@ -488,18 +479,39 @@ static int pisp_fe_pad_set_fmt(struct v4l2_subdev *sd,
 }
 
 static const struct v4l2_subdev_pad_ops pisp_fe_subdev_pad_ops = {
-	.init_cfg = pisp_fe_init_cfg,
 	.get_fmt = v4l2_subdev_get_fmt,
 	.set_fmt = pisp_fe_pad_set_fmt,
 	.link_validate = v4l2_subdev_link_validate_default,
 };
 
+static int pisp_fe_link_validate(struct media_link *link)
+{
+	struct v4l2_subdev *sd = media_entity_to_v4l2_subdev(link->sink->entity);
+	struct pisp_fe_device *fe = container_of(sd, struct pisp_fe_device, sd);
+
+	pisp_fe_dbg("%s: link \"%s\":%u -> \"%s\":%u\n", __func__,
+		    link->source->entity->name, link->source->index,
+		    link->sink->entity->name, link->sink->index);
+
+	if (link->sink->index == FE_STREAM_PAD)
+		return v4l2_subdev_link_validate(link);
+
+	if (link->sink->index == FE_CONFIG_PAD)
+		return 0;
+
+	return -EINVAL;
+}
+
 static const struct media_entity_operations pisp_fe_entity_ops = {
-	.link_validate = v4l2_subdev_link_validate,
+	.link_validate = pisp_fe_link_validate,
 };
 
 static const struct v4l2_subdev_ops pisp_fe_subdev_ops = {
 	.pad = &pisp_fe_subdev_pad_ops,
+};
+
+static const struct v4l2_subdev_internal_ops pisp_fe_internal_ops = {
+	.init_state = pisp_fe_init_state,
 };
 
 int pisp_fe_init(struct pisp_fe_device *fe, struct dentry *debugfs)
@@ -509,9 +521,9 @@ int pisp_fe_init(struct pisp_fe_device *fe, struct dentry *debugfs)
 	debugfs_create_file("pisp_regs", 0444, debugfs, fe, &pisp_regs_fops);
 
 	fe->hw_revision = pisp_fe_reg_read(fe, FE_VERSION);
-	pisp_fe_info("PiSP FE HW v%u.%u\n",
-		     (fe->hw_revision >> 24) & 0xff,
-		     (fe->hw_revision >> 20) & 0x0f);
+	pisp_fe_dbg("PiSP FE HW v%u.%u\n",
+		    (fe->hw_revision >> 24) & 0xff,
+		    (fe->hw_revision >> 20) & 0x0f);
 
 	fe->pad[FE_STREAM_PAD].flags =
 		MEDIA_PAD_FL_SINK | MEDIA_PAD_FL_MUST_CONNECT;
@@ -527,6 +539,7 @@ int pisp_fe_init(struct pisp_fe_device *fe, struct dentry *debugfs)
 
 	/* Initialize subdev */
 	v4l2_subdev_init(&fe->sd, &pisp_fe_subdev_ops);
+	fe->sd.internal_ops = &pisp_fe_internal_ops;
 	fe->sd.entity.function = MEDIA_ENT_F_PROC_VIDEO_SCALER;
 	fe->sd.entity.ops = &pisp_fe_entity_ops;
 	fe->sd.entity.name = "pisp-fe";
