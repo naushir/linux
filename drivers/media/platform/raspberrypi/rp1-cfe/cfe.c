@@ -50,6 +50,7 @@
 #define CFE_VERSION	"1.0"
 
 #define cfe_dbg(fmt, arg...) dev_dbg(&cfe->pdev->dev, fmt, ##arg)
+#define cfe_info(fmt, arg...) dev_info(&cfe->pdev->dev, fmt, ##arg)
 #define cfe_err(fmt, arg...) dev_err(&cfe->pdev->dev, fmt, ##arg)
 
 /* MIPICFG registers */
@@ -2010,8 +2011,8 @@ static int cfe_register_node(struct cfe_device *cfe, int id)
 		return ret;
 	}
 
-	cfe_dbg("Registered [%s] node id %d successfully as /dev/video%u\n",
-		vdev->name, id, vdev->num);
+	cfe_info("Registered [%s] node id %d successfully as /dev/video%u\n",
+		 vdev->name, id, vdev->num);
 
 	/*
 	 * Acquire a reference to cfe, which will be released when the video
@@ -2220,8 +2221,8 @@ static int cfe_register_async_nf(struct cfe_device *cfe)
 
 	cfe->remote_ep_fwnode = remote_ep_fwnode;
 
-	cfe_dbg("source %pfwf: %u data lanes, flags=0x%08x\n",
-		remote_ep_fwnode, cfe->csi2.dphy.max_lanes, cfe->csi2.bus_flags);
+	cfe_info("source %pfwf: %u data lanes, flags=0x%08x\n",
+		 remote_ep_fwnode, cfe->csi2.dphy.max_lanes, cfe->csi2.bus_flags);
 
 	/* Initialize and register the async notifier. */
 	v4l2_async_nf_init(&cfe->notifier, &cfe->v4l2_dev);

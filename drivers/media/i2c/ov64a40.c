@@ -2604,8 +2604,8 @@ static struct ov64a40_mode {
 		.analogue_crop = {
 			.left = 0,
 			.top = 0,
-			.width = 9279,
-			.height = 6975,
+			.width = 9280,
+			.height = 6976,
 		},
 		.digital_crop = {
 			.left = 17,
@@ -2645,8 +2645,8 @@ static struct ov64a40_mode {
 		.analogue_crop = {
 			.left = 624,
 			.top = 472,
-			.width = 8047,
-			.height = 6031,
+			.width = 8048,
+			.height = 6032,
 		},
 		.digital_crop = {
 			.left = 17,
@@ -2686,8 +2686,8 @@ static struct ov64a40_mode {
 		.analogue_crop = {
 			.left = 0,
 			.top = 0,
-			.width = 9279,
-			.height = 6975,
+			.width = 9280,
+			.height = 6976,
 		},
 		.digital_crop = {
 			.left = 9,
@@ -2727,8 +2727,8 @@ static struct ov64a40_mode {
 		.analogue_crop = {
 			.left = 784,
 			.top = 1312,
-			.width = 7711,
-			.height = 4351,
+			.width = 7712,
+			.height = 4352,
 		},
 		.digital_crop = {
 			.left = 9,
@@ -2768,8 +2768,8 @@ static struct ov64a40_mode {
 		.analogue_crop = {
 			.left = 0,
 			.top = 0,
-			.width = 9279,
-			.height = 6975,
+			.width = 9280,
+			.height = 6976,
 		},
 		.digital_crop = {
 			.left = 5,
@@ -2809,8 +2809,8 @@ static struct ov64a40_mode {
 		.analogue_crop = {
 			.left = 784,
 			.top = 1312,
-			.width = 7711,
-			.height = 4351,
+			.width = 7712,
+			.height = 4352,
 		},
 		.digital_crop = {
 			.left = 7,
@@ -2858,7 +2858,7 @@ struct ov64a40 {
 
 static inline struct ov64a40 *sd_to_ov64a40(struct v4l2_subdev *sd)
 {
-	return container_of(sd, struct ov64a40, sd);
+	return container_of_const(sd, struct ov64a40, sd);
 }
 
 static const struct ov64a40_timings *
@@ -2886,9 +2886,9 @@ static int ov64a40_program_geometry(struct ov64a40 *ov64a40)
 	cci_write(ov64a40->cci, OV64A40_REG_TIMING_CTRL2,
 		  anacrop->top, &ret);
 	cci_write(ov64a40->cci, OV64A40_REG_TIMING_CTRL4,
-		  anacrop->width + anacrop->left, &ret);
+		  anacrop->width + anacrop->left - 1, &ret);
 	cci_write(ov64a40->cci, OV64A40_REG_TIMING_CTRL6,
-		  anacrop->height + anacrop->top, &ret);
+		  anacrop->height + anacrop->top - 1, &ret);
 
 	/* ISP windowing. */
 	cci_write(ov64a40->cci, OV64A40_REG_TIMING_CTRL10,
@@ -3052,17 +3052,17 @@ static void ov64a40_update_pad_fmt(struct ov64a40 *ov64a40,
 	fmt->ycbcr_enc = V4L2_YCBCR_ENC_601;
 }
 
-static int ov64a40_init_cfg(struct v4l2_subdev *sd,
-			    struct v4l2_subdev_state *state)
+static int ov64a40_init_state(struct v4l2_subdev *sd,
+			      struct v4l2_subdev_state *state)
 {
 	struct ov64a40 *ov64a40 = sd_to_ov64a40(sd);
 	struct v4l2_mbus_framefmt *format;
 	struct v4l2_rect *crop;
 
-	format = v4l2_subdev_get_pad_format(sd, state, 0);
+	format = v4l2_subdev_state_get_format(state, 0);
 	ov64a40_update_pad_fmt(ov64a40, &ov64a40_modes[0], format);
 
-	crop = v4l2_subdev_get_pad_crop(sd, state, 0);
+	crop = v4l2_subdev_state_get_crop(state, 0);
 	crop->top = OV64A40_PIXEL_ARRAY_TOP;
 	crop->left = OV64A40_PIXEL_ARRAY_LEFT;
 	crop->width = OV64A40_PIXEL_ARRAY_WIDTH;
@@ -3072,7 +3072,7 @@ static int ov64a40_init_cfg(struct v4l2_subdev *sd,
 }
 
 static int ov64a40_enum_mbus_code(struct v4l2_subdev *sd,
-				  struct v4l2_subdev_state *sd_state,
+				  struct v4l2_subdev_state *state,
 				  struct v4l2_subdev_mbus_code_enum *code)
 {
 	struct ov64a40 *ov64a40 = sd_to_ov64a40(sd);
@@ -3086,7 +3086,7 @@ static int ov64a40_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int ov64a40_enum_frame_size(struct v4l2_subdev *sd,
-				   struct v4l2_subdev_state *sd_state,
+				   struct v4l2_subdev_state *state,
 				   struct v4l2_subdev_frame_size_enum *fse)
 {
 	struct ov64a40 *ov64a40 = sd_to_ov64a40(sd);
@@ -3110,12 +3110,12 @@ static int ov64a40_enum_frame_size(struct v4l2_subdev *sd,
 }
 
 static int ov64a40_get_selection(struct v4l2_subdev *sd,
-				 struct v4l2_subdev_state *sd_state,
+				 struct v4l2_subdev_state *state,
 				 struct v4l2_subdev_selection *sel)
 {
 	switch (sel->target) {
 	case V4L2_SEL_TGT_CROP:
-		sel->r = *v4l2_subdev_get_pad_crop(sd, sd_state, 0);
+		sel->r = *v4l2_subdev_state_get_crop(state, 0);
 
 		return 0;
 
@@ -3141,7 +3141,7 @@ static int ov64a40_get_selection(struct v4l2_subdev *sd,
 }
 
 static int ov64a40_set_format(struct v4l2_subdev *sd,
-			      struct v4l2_subdev_state *sd_state,
+			      struct v4l2_subdev_state *state,
 			      struct v4l2_subdev_format *fmt)
 {
 	struct ov64a40 *ov64a40 = sd_to_ov64a40(sd);
@@ -3155,7 +3155,7 @@ static int ov64a40_set_format(struct v4l2_subdev *sd,
 
 	ov64a40_update_pad_fmt(ov64a40, mode, &fmt->format);
 
-	format = v4l2_subdev_get_pad_format(sd, sd_state, 0);
+	format = v4l2_subdev_state_get_format(state, 0);
 	if (ov64a40->mode == mode && format->code == fmt->format.code)
 		return 0;
 
@@ -3166,7 +3166,7 @@ static int ov64a40_set_format(struct v4l2_subdev *sd,
 		int exp_max;
 
 		ov64a40->mode = mode;
-		*v4l2_subdev_get_pad_crop(sd, sd_state, 0) = mode->analogue_crop;
+		*v4l2_subdev_state_get_crop(state, 0) = mode->analogue_crop;
 
 		/* Update control limits according to the new mode. */
 		timings = ov64a40_get_timings(ov64a40,
@@ -3193,7 +3193,6 @@ static int ov64a40_set_format(struct v4l2_subdev *sd,
 }
 
 static const struct v4l2_subdev_pad_ops ov64a40_pad_ops = {
-	.init_cfg = ov64a40_init_cfg,
 	.enum_mbus_code = ov64a40_enum_mbus_code,
 	.enum_frame_size = ov64a40_enum_frame_size,
 	.get_fmt = v4l2_subdev_get_fmt,
@@ -3210,6 +3209,10 @@ static const struct v4l2_subdev_ops ov64a40_subdev_ops = {
 	.core = &ov64a40_core_ops,
 	.video = &ov64a40_video_ops,
 	.pad = &ov64a40_pad_ops,
+};
+
+static const struct v4l2_subdev_internal_ops ov64a40_internal_ops = {
+	.init_state = ov64a40_init_state,
 };
 
 static int ov64a40_power_on(struct device *dev)
@@ -3457,8 +3460,8 @@ static int ov64a40_parse_dt(struct ov64a40 *ov64a40)
 		.bus_type = V4L2_MBUS_CSI2_DPHY
 	};
 	struct fwnode_handle *endpoint;
-	int ret = -EINVAL;
 	unsigned int i;
+	int ret;
 
 	endpoint = fwnode_graph_get_next_endpoint(dev_fwnode(ov64a40->dev),
 						  NULL);
@@ -3467,27 +3470,31 @@ static int ov64a40_parse_dt(struct ov64a40 *ov64a40)
 		return -EINVAL;
 	}
 
-	if (v4l2_fwnode_endpoint_alloc_parse(endpoint, &v4l2_fwnode)) {
+	ret = v4l2_fwnode_endpoint_alloc_parse(endpoint, &v4l2_fwnode);
+	fwnode_handle_put(endpoint);
+	if (ret) {
 		dev_err(ov64a40->dev, "Failed to parse endpoint\n");
-		goto error_put_fwnode;
-
+		return ret;
 	}
 
 	if (v4l2_fwnode.bus.mipi_csi2.num_data_lanes != 2) {
 		dev_err(ov64a40->dev, "Unsupported number of data lanes: %u\n",
 			v4l2_fwnode.bus.mipi_csi2.num_data_lanes);
-		goto error_free_fwnode;
+		v4l2_fwnode_endpoint_free(&v4l2_fwnode);
+		return -EINVAL;
 	}
 
 	if (!v4l2_fwnode.nr_of_link_frequencies) {
 		dev_warn(ov64a40->dev, "no link frequencies defined\n");
-		goto error_free_fwnode;
+		v4l2_fwnode_endpoint_free(&v4l2_fwnode);
+		return -EINVAL;
 	}
 
 	if (v4l2_fwnode.nr_of_link_frequencies > 2) {
 		dev_warn(ov64a40->dev,
 			 "Unsupported number of link frequencies\n");
-		goto error_free_fwnode;
+		v4l2_fwnode_endpoint_free(&v4l2_fwnode);
+		return -EINVAL;
 	}
 
 	ov64a40->link_frequencies =
@@ -3495,8 +3502,8 @@ static int ov64a40_parse_dt(struct ov64a40 *ov64a40)
 			     sizeof(v4l2_fwnode.link_frequencies[0]),
 			     GFP_KERNEL);
 	if (!ov64a40->link_frequencies)  {
-		ret = -ENOMEM;
-		goto error_free_fwnode;
+		v4l2_fwnode_endpoint_free(&v4l2_fwnode);
+		return -ENOMEM;
 	}
 	ov64a40->num_link_frequencies = v4l2_fwnode.nr_of_link_frequencies;
 
@@ -3506,7 +3513,8 @@ static int ov64a40_parse_dt(struct ov64a40 *ov64a40)
 			dev_err(ov64a40->dev,
 				"Unsupported link frequency %lld\n",
 				v4l2_fwnode.link_frequencies[i]);
-			goto error_free_fwnode;
+			v4l2_fwnode_endpoint_free(&v4l2_fwnode);
+			return -EINVAL;
 		}
 
 		ov64a40->link_frequencies[i] = v4l2_fwnode.link_frequencies[i];
@@ -3514,16 +3522,7 @@ static int ov64a40_parse_dt(struct ov64a40 *ov64a40)
 
 	v4l2_fwnode_endpoint_free(&v4l2_fwnode);
 
-	/* Register the subdev on the endpoint, so don't put it yet. */
-	ov64a40->sd.fwnode = endpoint;
-
 	return 0;
-
-error_free_fwnode:
-	v4l2_fwnode_endpoint_free(&v4l2_fwnode);
-error_put_fwnode:
-	fwnode_handle_put(endpoint);
-	return ret;
 }
 
 static int ov64a40_get_regulators(struct ov64a40 *ov64a40)
@@ -3559,7 +3558,7 @@ static int ov64a40_probe(struct i2c_client *client)
 	}
 
 	ov64a40->xclk = devm_clk_get(&client->dev, NULL);
-	if (!ov64a40->xclk)
+	if (IS_ERR(ov64a40->xclk))
 		return dev_err_probe(&client->dev, PTR_ERR(ov64a40->xclk),
 				     "Failed to get clock\n");
 
@@ -3586,7 +3585,7 @@ static int ov64a40_probe(struct i2c_client *client)
 
 	ret = ov64a40_power_on(&client->dev);
 	if (ret)
-		goto error_put_fwnode;
+		return ret;
 
 	ret = ov64a40_identify(ov64a40);
 	if (ret)
@@ -3605,6 +3604,7 @@ static int ov64a40_probe(struct i2c_client *client)
 		goto error_poweroff;
 
 	/* Initialize subdev */
+	ov64a40->sd.internal_ops = &ov64a40_internal_ops;
 	ov64a40->sd.flags = V4L2_SUBDEV_FL_HAS_DEVNODE
 			  | V4L2_SUBDEV_FL_HAS_EVENTS;
 	ov64a40->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
@@ -3644,8 +3644,6 @@ error_handler_free:
 error_poweroff:
 	ov64a40_power_off(&client->dev);
 	pm_runtime_set_suspended(&client->dev);
-error_put_fwnode:
-	fwnode_handle_put(ov64a40->sd.fwnode);
 
 	return ret;
 }
@@ -3653,10 +3651,8 @@ error_put_fwnode:
 static void ov64a40_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
-	struct ov64a40 *ov64a40 = sd_to_ov64a40(sd);
 
 	v4l2_async_unregister_subdev(sd);
-	fwnode_handle_put(ov64a40->sd.fwnode);
 	v4l2_subdev_cleanup(sd);
 	media_entity_cleanup(&sd->entity);
 	v4l2_ctrl_handler_free(sd->ctrl_handler);
@@ -3683,7 +3679,7 @@ static struct i2c_driver ov64a40_i2c_driver = {
 		.of_match_table	= ov64a40_of_ids,
 		.pm = &ov64a40_pm_ops,
 	},
-	.probe = ov64a40_probe,
+	.probe	= ov64a40_probe,
 	.remove	= ov64a40_remove,
 };
 

@@ -117,6 +117,7 @@ static const struct pisp_fe_config_param pisp_fe_config_map[] = {
 };
 
 #define pisp_fe_dbg(fmt, arg...) dev_dbg(fe->v4l2_dev->dev, fmt, ##arg)
+#define pisp_fe_info(fmt, arg...) dev_info(fe->v4l2_dev->dev, fmt, ##arg)
 #define pisp_fe_err(fmt, arg...) dev_err(fe->v4l2_dev->dev, fmt, ##arg)
 
 static inline u32 pisp_fe_reg_read(struct pisp_fe_device *fe, u32 offset)
@@ -521,9 +522,9 @@ int pisp_fe_init(struct pisp_fe_device *fe, struct dentry *debugfs)
 	debugfs_create_file("pisp_regs", 0444, debugfs, fe, &pisp_regs_fops);
 
 	fe->hw_revision = pisp_fe_reg_read(fe, FE_VERSION);
-	pisp_fe_dbg("PiSP FE HW v%u.%u\n",
-		    (fe->hw_revision >> 24) & 0xff,
-		    (fe->hw_revision >> 20) & 0x0f);
+	pisp_fe_info("PiSP FE HW v%u.%u\n",
+		     (fe->hw_revision >> 24) & 0xff,
+		     (fe->hw_revision >> 20) & 0x0f);
 
 	fe->pad[FE_STREAM_PAD].flags =
 		MEDIA_PAD_FL_SINK | MEDIA_PAD_FL_MUST_CONNECT;
