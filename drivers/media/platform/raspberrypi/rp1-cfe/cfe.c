@@ -136,7 +136,7 @@ static const struct node_description node_desc[NUM_NODES] = {
 	},
 	[CSI2_CH1] = {
 		.name = "csi2-ch1",
-		.caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_META_CAPTURE,
+		.caps = V4L2_CAP_META_CAPTURE,
 		.pad_flags = MEDIA_PAD_FL_SINK | MEDIA_PAD_FL_MUST_CONNECT,
 		.link_pad = CSI2_PAD_FIRST_SOURCE + 1
 	},
@@ -2159,7 +2159,7 @@ static int cfe_async_bound(struct v4l2_async_notifier *notifier,
 
 	cfe->source_sd = subdev;
 
-	cfe_dbg("Using source %s for capture\n", subdev->name);
+	cfe_info("Using source %s for capture\n", subdev->name);
 
 	return 0;
 }
