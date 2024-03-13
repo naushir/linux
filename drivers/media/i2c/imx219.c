@@ -790,7 +790,7 @@ static int imx219_enum_mbus_code(struct v4l2_subdev *sd,
 {
 	struct imx219 *imx219 = to_imx219(sd);
 
-	if (code->pad == IMX219_PAD_EDATA) {
+	if (code->pad == IMX219_PAD_EDATA || code->stream == IMX219_STREAM_EDATA) {
 		struct v4l2_mbus_framefmt *fmt;
 
 		if (code->index)
@@ -817,7 +817,7 @@ static int imx219_enum_frame_size(struct v4l2_subdev *sd,
 	struct imx219 *imx219 = to_imx219(sd);
 	u32 code;
 
-	if (fse->pad == IMX219_PAD_EDATA) {
+	if (fse->pad == IMX219_PAD_EDATA || fse->stream == IMX219_STREAM_EDATA) {
 		struct v4l2_mbus_framefmt *fmt;
 
 		if (fse->index)
