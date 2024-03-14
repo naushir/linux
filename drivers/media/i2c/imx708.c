@@ -1342,7 +1342,6 @@ static int imx708_get_frame_desc(struct v4l2_subdev *sd, unsigned int pad,
 	return 0;
 }
 
-
 static int imx708_set_pad_format(struct v4l2_subdev *sd,
 				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_format *fmt)
@@ -2057,7 +2056,7 @@ static int imx708_probe(struct i2c_client *client)
 	/* This needs the pm runtime to be registered. */
 	ret = imx708_init_controls(imx708);
 	if (ret)
-		goto error_pm_runtime;
+		goto error_power_off;
 
 	/* Initialize subdev */
 	imx708->sd.internal_ops = &imx708_internal_ops;
@@ -2108,10 +2107,6 @@ error_media_entity:
 
 error_handler_free:
 	imx708_free_controls(imx708);
-
-error_pm_runtime:
-	pm_runtime_disable(&client->dev);
-	pm_runtime_set_suspended(&client->dev);
 
 error_power_off:
 	imx708_power_off(&client->dev);
