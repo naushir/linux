@@ -119,15 +119,6 @@ MODULE_PARM_DESC(qbc_adjust, "Quad Bayer broken line correction strength [0,2-5]
 #define IMX708_LPF_INTENSITY_DISABLED	0x01
 #define IMX708_LPF_INTENSITY		0xC429
 
-/*
- * Metadata buffer holds a variety of data, all sent with the same VC/DT (0x12).
- * It comprises two scanlines (of up to 5760 bytes each, for 4608 pixels)
- * of embedded data, one line of PDAF data, and two lines of AE-HIST data
- * (AE histograms are valid for HDR mode and empty in non-HDR modes).
- */
-#define IMX708_EMBEDDED_LINE_WIDTH (5 * 5760)
-#define IMX708_NUM_EMBEDDED_LINES 1
-
 /* IMX708 native and active pixel array size. */
 #define IMX708_NATIVE_FORMAT		MEDIA_BUS_FMT_SRGGB10_1X10
 #define IMX708_NATIVE_WIDTH		4640U
@@ -137,8 +128,14 @@ MODULE_PARM_DESC(qbc_adjust, "Quad Bayer broken line correction strength [0,2-5]
 #define IMX708_PIXEL_ARRAY_WIDTH	4608U
 #define IMX708_PIXEL_ARRAY_HEIGHT	2592U
 
-/* Embedded metadata stream height */
-#define IMX708_EMBEDDED_DATA_HEIGHT	2U
+/*
+ * Metadata buffer holds a variety of data, all sent with the same VC/DT (0x12).
+ * It comprises two scanlines (of up to 5760 bytes each, for 4608 pixels)
+ * of embedded data, one line of PDAF data, and two lines of AE-HIST data
+ * (AE histograms are valid for HDR mode and empty in non-HDR modes).
+ */
+#define IMX708_EMBEDDED_DATA_WIDTH	5760
+#define IMX708_EMBEDDED_DATA_HEIGHT	5U
 
 struct imx708_reg {
 	u16 address;
@@ -1262,8 +1259,8 @@ static int imx708_enum_frame_size(struct v4l2_subdev *sd,
 		if (fse->code != MEDIA_BUS_FMT_CCS_EMBEDDED || fse->index > 0)
 			return -EINVAL;
 
-		fse->min_width = IMX708_NATIVE_WIDTH;
-		fse->max_width = IMX708_NATIVE_WIDTH;
+		fse->min_width = IMX708_EMBEDDED_DATA_WIDTH;
+		fse->max_width = IMX708_EMBEDDED_DATA_WIDTH;
 		fse->min_height = IMX708_EMBEDDED_DATA_HEIGHT;
 		fse->max_height = IMX708_EMBEDDED_DATA_HEIGHT;
 		return 0;
@@ -1299,8 +1296,8 @@ static int imx708_enum_frame_size(struct v4l2_subdev *sd,
 		if (fse->index)
 			return -EINVAL;
 
-		fse->min_width = fmt->width;
-		fse->max_width = fmt->width;
+		fse->min_width = IMX708_EMBEDDED_DATA_WIDTH;
+		fse->max_width = IMX708_EMBEDDED_DATA_WIDTH;
 		fse->min_height = IMX708_EMBEDDED_DATA_HEIGHT;
 		fse->max_height = IMX708_EMBEDDED_DATA_HEIGHT;
 	}
@@ -1425,7 +1422,7 @@ static int imx708_set_pad_format(struct v4l2_subdev *sd,
 	 */
 	ed_format = v4l2_subdev_state_get_format(sd_state, IMX708_PAD_EDATA);
 	ed_format->code = MEDIA_BUS_FMT_META_10;
-	ed_format->width = format->width;
+	ed_format->width = IMX708_EMBEDDED_DATA_WIDTH;
 	ed_format->height = IMX708_EMBEDDED_DATA_HEIGHT;
 	ed_format->field = V4L2_FIELD_NONE;
 
