@@ -134,7 +134,7 @@ MODULE_PARM_DESC(qbc_adjust, "Quad Bayer broken line correction strength [0,2-5]
  * of embedded data, one line of PDAF data, and two lines of AE-HIST data
  * (AE histograms are valid for HDR mode and empty in non-HDR modes).
  */
-#define IMX708_EMBEDDED_DATA_WIDTH	5760
+#define IMX708_EMBEDDED_DATA_WIDTH	IMX708_PIXEL_ARRAY_WIDTH
 #define IMX708_EMBEDDED_DATA_HEIGHT	5U
 
 struct imx708_reg {
