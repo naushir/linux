@@ -134,6 +134,12 @@ static const struct node_description node_desc[NUM_NODES] = {
 		.pad_flags = MEDIA_PAD_FL_SINK | MEDIA_PAD_FL_MUST_CONNECT,
 		.link_pad = CSI2_PAD_FIRST_SOURCE + 0
 	},
+	/*
+	 * At the moment the main userspace component (libcamera) doesn't
+	 * support metadata with video nodes that support both video and
+	 * metadata. So for the time being this node is set to only support
+	 * V4L2_CAP_META_CAPTURE.
+	 */
 	[CSI2_CH1] = {
 		.name = "csi2-ch1",
 		.caps = V4L2_CAP_META_CAPTURE,
@@ -773,8 +779,8 @@ static int cfe_get_vc_dt_fallback(struct cfe_device *cfe, u8 *vc, u8 *dt)
 	return 0;
 }
 
-static int cfe_get_vc_dt(struct cfe_device *cfe, unsigned int channel,
-			  u8 *vc, u8 *dt)
+static int cfe_get_vc_dt(struct cfe_device *cfe, unsigned int channel, u8 *vc,
+			 u8 *dt)
 {
 	struct v4l2_mbus_frame_desc remote_desc;
 	struct v4l2_subdev_state *state;
@@ -811,7 +817,7 @@ static int cfe_get_vc_dt(struct cfe_device *cfe, unsigned int channel,
 
 	if (i == remote_desc.num_entries) {
 		cfe_err("Stream %u not found in remote frame desc\n",
-			 sink_stream);
+			sink_stream);
 		return -EINVAL;
 	}
 
@@ -1069,56 +1075,48 @@ static void cfe_buffer_queue(struct vb2_buffer *vb)
 	spin_unlock_irqrestore(&cfe->state_lock, flags);
 }
 
-static u64 sensor_link_rate(struct cfe_device *cfe)
+static s64 cfe_get_source_link_freq(struct cfe_device *cfe)
 {
-	struct v4l2_mbus_framefmt *source_fmt;
 	struct v4l2_subdev_state *state;
-	struct media_entity *entity;
-	struct v4l2_subdev *subdev;
-	const struct cfe_fmt *fmt;
-	struct media_pad *pad;
 	s64 link_freq;
+	u32 bpp;
 
 	state = v4l2_subdev_get_locked_active_state(&cfe->csi2.sd);
-	source_fmt = v4l2_subdev_state_get_format(state, 0);
-	fmt = find_format_by_code(source_fmt->code);
 
 	/*
-	 * Walk up the media graph to find either the sensor entity, or another
-	 * entity that advertises the V4L2_CID_LINK_FREQ or V4L2_CID_PIXEL_RATE
-	 * control through the subdev.
+	 * v4l2_get_link_freq() uses V4L2_CID_LINK_FREQ first, and falls back
+	 * to V4L2_CID_PIXEL_RATE if V4L2_CID_LINK_FREQ is not available.
+	 *
+	 * With multistream input there is no single pixel rate, and thus we
+	 * cannot use V4L2_CID_PIXEL_RATE, so we pass 0 as the bpp which
+	 * causes v4l2_get_link_freq() to return an error if it falls back to
+	 * V4L2_CID_PIXEL_RATE.
 	 */
-	entity = &cfe->csi2.sd.entity;
-	while (1) {
-		pad = &entity->pads[0];
-		if (!(pad->flags & MEDIA_PAD_FL_SINK))
-			goto err;
 
-		pad = media_pad_remote_pad_first(pad);
-		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
-			goto err;
+	if (state->routing.num_routes == 1) {
+		struct v4l2_subdev_route *route = &state->routing.routes[0];
+		struct v4l2_mbus_framefmt *source_fmt;
+		const struct cfe_fmt *fmt;
 
-		entity = pad->entity;
-		subdev = media_entity_to_v4l2_subdev(entity);
-		if (entity->function == MEDIA_ENT_F_CAM_SENSOR ||
-		    v4l2_ctrl_find(subdev->ctrl_handler, V4L2_CID_LINK_FREQ) ||
-		    v4l2_ctrl_find(subdev->ctrl_handler, V4L2_CID_PIXEL_RATE))
-			break;
+		source_fmt = v4l2_subdev_state_get_format(state,
+			route->sink_pad, route->sink_stream);
+
+		fmt = find_format_by_code(source_fmt->code);
+		if (!fmt)
+			return -EINVAL;
+
+		bpp = fmt->depth;
+	} else {
+		bpp = 0;
 	}
 
-	link_freq = v4l2_get_link_freq(subdev->ctrl_handler, fmt->depth,
-				       cfe->csi2.dphy.active_lanes * 2);
+	link_freq = v4l2_get_link_freq(cfe->source_sd->ctrl_handler, bpp,
+				       2 * cfe->csi2.dphy.active_lanes);
 	if (link_freq < 0)
-		goto err;
+		cfe_err("failed to get link freq for subdev '%s'\n",
+			cfe->source_sd->name);
 
-	/* x2 for DDR. */
-	link_freq *= 2;
-	cfe_dbg("Using a link rate of %lld Mbps\n", link_freq / (1000 * 1000));
 	return link_freq;
-
-err:
-	cfe_err("Unable to determine sensor link rate, using 999 Mbps\n");
-	return 999 * 1000000UL;
 }
 
 static int cfe_start_streaming(struct vb2_queue *vq, unsigned int count)
@@ -1128,6 +1126,7 @@ static int cfe_start_streaming(struct vb2_queue *vq, unsigned int count)
 	struct cfe_device *cfe = node->cfe;
 	struct v4l2_subdev_state *state;
 	struct v4l2_subdev_route *route;
+	s64 link_freq;
 	int ret;
 
 	cfe_dbg("%s: [%s] begin.\n", __func__, node_desc[node->id].name);
@@ -1197,7 +1196,13 @@ static int cfe_start_streaming(struct vb2_queue *vq, unsigned int count)
 
 	cfe_dbg("Configuring CSI-2 block - %u data lanes\n",
 		cfe->csi2.dphy.active_lanes);
-	cfe->csi2.dphy.dphy_rate = sensor_link_rate(cfe) / 1000000UL;
+
+	link_freq = cfe_get_source_link_freq(cfe);
+	if (link_freq < 0)
+		goto err_clear_inte;
+
+	cfe->csi2.dphy.dphy_rate = div_s64(link_freq * 2, 1000000);
+	cfe_dbg("Using a link rate of %u Mbps\n", cfe->csi2.dphy.dphy_rate);
 	csi2_open_rx(&cfe->csi2);
 
 	cfe_dbg("Starting sensor streaming\n");
@@ -1367,7 +1372,7 @@ static int cfe_g_fmt(struct file *file, void *priv, struct v4l2_format *f)
 	return 0;
 }
 
-static int try_fmt_vid_cap(struct cfe_node *node, struct v4l2_format *f)
+static int cfe_validate_fmt_vid_cap(struct cfe_node *node, struct v4l2_format *f)
 {
 	struct cfe_device *cfe = node->cfe;
 	const struct cfe_fmt *fmt;
@@ -1413,7 +1418,7 @@ static int cfe_s_fmt_vid_cap(struct file *file, void *priv,
 	if (vb2_is_busy(q))
 		return -EBUSY;
 
-	ret = try_fmt_vid_cap(node, f);
+	ret = cfe_validate_fmt_vid_cap(node, f);
 	if (ret)
 		return ret;
 
@@ -1434,7 +1439,7 @@ static int cfe_try_fmt_vid_cap(struct file *file, void *priv,
 
 	cfe_dbg("%s: [%s]\n", __func__, node_desc[node->id].name);
 
-	return try_fmt_vid_cap(node, f);
+	return cfe_validate_fmt_vid_cap(node, f);
 }
 
 static int cfe_enum_fmt_meta(struct file *file, void *priv,
@@ -1482,7 +1487,7 @@ static int cfe_enum_fmt_meta(struct file *file, void *priv,
 	}
 }
 
-static int try_fmt_meta(struct cfe_node *node, struct v4l2_format *f)
+static int cfe_validate_fmt_meta(struct cfe_node *node, struct v4l2_format *f)
 {
 	const struct cfe_fmt *fmt;
 
@@ -1545,7 +1550,7 @@ static int cfe_s_fmt_meta(struct file *file, void *priv, struct v4l2_format *f)
 	if (!node_supports_meta(node))
 		return -EINVAL;
 
-	ret = try_fmt_meta(node, f);
+	ret = cfe_validate_fmt_meta(node, f);
 	if (ret)
 		return ret;
 
@@ -1564,7 +1569,7 @@ static int cfe_try_fmt_meta(struct file *file, void *priv,
 	struct cfe_device *cfe = node->cfe;
 
 	cfe_dbg("%s: [%s]\n", __func__, node_desc[node->id].name);
-	return try_fmt_meta(node, f);
+	return cfe_validate_fmt_meta(node, f);
 }
 
 static int cfe_enum_framesizes(struct file *file, void *priv,
@@ -1936,7 +1941,7 @@ static int cfe_register_node(struct cfe_device *cfe, int id)
 		node->vid_fmt.fmt.pix.pixelformat = fmt->fourcc;
 		v4l2_fill_pix_format(&node->vid_fmt.fmt.pix, &cfe_default_format);
 
-		ret = try_fmt_vid_cap(node, &node->vid_fmt);
+		ret = cfe_validate_fmt_vid_cap(node, &node->vid_fmt);
 		if (ret)
 			return ret;
 	}
@@ -1947,7 +1952,7 @@ static int cfe_register_node(struct cfe_device *cfe, int id)
 		else
 			node->meta_fmt.type = V4L2_BUF_TYPE_META_OUTPUT;
 
-		ret = try_fmt_meta(node, &node->meta_fmt);
+		ret = cfe_validate_fmt_meta(node, &node->meta_fmt);
 		if (ret)
 			return ret;
 	}
@@ -2011,7 +2016,7 @@ static int cfe_register_node(struct cfe_device *cfe, int id)
 		return ret;
 	}
 
-	cfe_info("Registered [%s] node id %d successfully as /dev/video%u\n",
+	cfe_info("Registered [%s] node id %d as /dev/video%u\n",
 		 vdev->name, id, vdev->num);
 
 	/*
@@ -2159,7 +2164,7 @@ static int cfe_async_bound(struct v4l2_async_notifier *notifier,
 
 	cfe->source_sd = subdev;
 
-	cfe_info("Using source %s for capture\n", subdev->name);
+	cfe_dbg("Using source %s for capture\n", subdev->name);
 
 	return 0;
 }
@@ -2221,8 +2226,8 @@ static int cfe_register_async_nf(struct cfe_device *cfe)
 
 	cfe->remote_ep_fwnode = remote_ep_fwnode;
 
-	cfe_info("source %pfwf: %u data lanes, flags=0x%08x\n",
-		 remote_ep_fwnode, cfe->csi2.dphy.max_lanes, cfe->csi2.bus_flags);
+	cfe_dbg("source %pfwf: %u data lanes, flags=0x%08x\n",
+		remote_ep_fwnode, cfe->csi2.dphy.max_lanes, cfe->csi2.bus_flags);
 
 	/* Initialize and register the async notifier. */
 	v4l2_async_nf_init(&cfe->notifier, &cfe->v4l2_dev);

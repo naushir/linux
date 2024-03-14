@@ -87,10 +87,9 @@ TRACE_EVENT(cfe_buffer_complete,
 		__entry->seq = buf->sequence;
 		__entry->ts = buf->vb2_buf.timestamp;
 	),
-	TP_printk("node=%u buf=%u seq=%u ts=%u.%u", __entry->node_id, __entry->buf_idx,
+	TP_printk("node=%u buf=%u seq=%u ts=%llu", __entry->node_id, __entry->buf_idx,
 		  __entry->seq,
-		  (u32)(__entry->ts / 1000000000),
-		  (u32)(__entry->ts - __entry->ts / 1000000000))
+		  __entry->ts)
 );
 
 TRACE_EVENT(cfe_frame_start,

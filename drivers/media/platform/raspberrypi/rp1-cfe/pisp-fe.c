@@ -137,7 +137,7 @@ static inline void pisp_fe_reg_write_relaxed(struct pisp_fe_device *fe,
 	writel_relaxed(val, fe->base + offset);
 }
 
-static int pisp_regs_show(struct seq_file *s, void *data)
+static int pisp_fe_regs_show(struct seq_file *s, void *data)
 {
 	struct pisp_fe_device *fe = s->private;
 	int ret;
@@ -164,11 +164,11 @@ static int pisp_regs_show(struct seq_file *s, void *data)
 	return 0;
 }
 
-DEFINE_SHOW_ATTRIBUTE(pisp_regs);
+DEFINE_SHOW_ATTRIBUTE(pisp_fe_regs);
 
-static void pisp_config_write(struct pisp_fe_device *fe,
-			      struct pisp_fe_config *config,
-			      unsigned int start_offset, unsigned int size)
+static void pisp_fe_config_write(struct pisp_fe_device *fe,
+				 struct pisp_fe_config *config,
+				 unsigned int start_offset, unsigned int size)
 {
 	const unsigned int max_offset =
 		offsetof(struct pisp_fe_config, ch[PISP_FE_NUM_OUTPUTS]);
@@ -337,8 +337,8 @@ void pisp_fe_submit_job(struct pisp_fe_device *fe, struct vb2_buffer **vb2_bufs,
 	 * Selectively write other parameters that have been marked as
 	 * changed through the dirty flags.
 	 */
-	pisp_config_write(fe, cfg, 0,
-			  offsetof(struct pisp_fe_config, decompress));
+	pisp_fe_config_write(fe, cfg, 0,
+			     offsetof(struct pisp_fe_config, decompress));
 	cfg->dirty_flags_extra &= ~PISP_FE_DIRTY_GLOBAL;
 	cfg->dirty_flags &= ~PISP_FE_ENABLE_INPUT;
 	cfg->dirty_flags |= (cfg->global.enables &
@@ -350,7 +350,7 @@ void pisp_fe_submit_job(struct pisp_fe_device *fe, struct vb2_buffer **vb2_bufs,
 
 		if (cfg->dirty_flags & p->dirty_flags ||
 		    cfg->dirty_flags_extra & p->dirty_flags_extra)
-			pisp_config_write(fe, cfg, p->offset, p->size);
+			pisp_fe_config_write(fe, cfg, p->offset, p->size);
 	}
 
 	/* This final non-relaxed write serves as a memory barrier */
@@ -519,7 +519,7 @@ int pisp_fe_init(struct pisp_fe_device *fe, struct dentry *debugfs)
 {
 	int ret;
 
-	debugfs_create_file("pisp_regs", 0444, debugfs, fe, &pisp_regs_fops);
+	debugfs_create_file("fe_regs", 0444, debugfs, fe, &pisp_fe_regs_fops);
 
 	fe->hw_revision = pisp_fe_reg_read(fe, FE_VERSION);
 	pisp_fe_info("PiSP FE HW v%u.%u\n",
