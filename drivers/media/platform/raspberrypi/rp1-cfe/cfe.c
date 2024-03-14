@@ -1499,9 +1499,15 @@ static int cfe_validate_fmt_meta(struct cfe_node *node, struct v4l2_format *f)
 		fmt = find_format_by_pix(f->fmt.meta.dataformat);
 		if (!fmt || !(fmt->flags & CFE_FORMAT_FLAG_META_CAP))
 			f->fmt.meta.dataformat = V4L2_META_FMT_GENERIC_CSI2_10;
-
-		if (!f->fmt.meta.buffersize)
-			f->fmt.meta.buffersize = DEFAULT_EMBEDDED_SIZE;
+		if (!f->fmt.meta.buffersize) {
+			if (f->fmt.meta.width && f->fmt.meta.height)
+				f->fmt.meta.buffersize =
+					DIV_ROUND_UP(f->fmt.meta.width *
+						     f->fmt.meta.height *
+						     fmt->depth, 8);
+			else
+				f->fmt.meta.buffersize = DEFAULT_EMBEDDED_SIZE;
+		}
 		f->fmt.meta.buffersize =
 			min_t(u32, f->fmt.meta.buffersize, MAX_BUFFER_SIZE);
 		f->fmt.meta.buffersize =
