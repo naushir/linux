@@ -74,7 +74,7 @@
 #define IMX219_REG_VTS			CCI_REG16(0x0160)
 #define IMX219_VTS_MAX			0xffff
 
-#define IMX219_VBLANK_MIN		32
+#define IMX219_VBLANK_MIN		4
 
 /* HBLANK control - read only */
 #define IMX219_PPL_DEFAULT		3448
@@ -314,7 +314,7 @@ static const struct imx219_mode supported_modes[] = {
 
 struct imx219 {
 	struct v4l2_subdev sd;
-	struct media_pad pad[NUM_PADS];
+	struct media_pad pad;
 
 	struct regmap *regmap;
 	struct clk *xclk; /* system clock to IMX219 */
@@ -395,10 +395,6 @@ static int imx219_set_ctrl(struct v4l2_ctrl *ctrl)
 	 */
 	if (pm_runtime_get_if_in_use(&client->dev) == 0)
 		return 0;
-
-	state = v4l2_subdev_get_locked_active_state(&imx219->sd);
-	format = v4l2_subdev_get_pad_format(&imx219->sd, state, 0);
-	rate_factor = imx219_get_rate_factor(imx219, format);
 
 	switch (ctrl->id) {
 	case V4L2_CID_ANALOGUE_GAIN:
@@ -783,20 +779,10 @@ static int imx219_enum_mbus_code(struct v4l2_subdev *sd,
 {
 	struct imx219 *imx219 = to_imx219(sd);
 
-	if (code->pad >= NUM_PADS)
+	if (code->index >= (ARRAY_SIZE(imx219_mbus_formats) / 4))
 		return -EINVAL;
 
-	if (code->pad == IMAGE_PAD) {
-		if (code->index >= (ARRAY_SIZE(imx219_mbus_formats) / 4))
-			return -EINVAL;
-
-		code->code = imx219_get_format_code(imx219, imx219_mbus_formats[code->index * 4]);
-	} else {
-		if (code->index > 0)
-			return -EINVAL;
-
-		code->code = MEDIA_BUS_FMT_SENSOR_DATA;
-	}
+	code->code = imx219_get_format_code(imx219, imx219_mbus_formats[code->index * 4]);
 
 	return 0;
 }
@@ -808,39 +794,19 @@ static int imx219_enum_frame_size(struct v4l2_subdev *sd,
 	struct imx219 *imx219 = to_imx219(sd);
 	u32 code;
 
-	if (fse->pad >= NUM_PADS)
+	if (fse->index >= ARRAY_SIZE(supported_modes))
 		return -EINVAL;
 
-	if (fse->pad == IMAGE_PAD) {
-		if (fse->index >= ARRAY_SIZE(supported_modes))
-			return -EINVAL;
+	code = imx219_get_format_code(imx219, fse->code);
+	if (fse->code != code)
+		return -EINVAL;
 
-		code = imx219_get_format_code(imx219, fse->code);
-		if (fse->code != code)
-			return -EINVAL;
-
-		fse->min_width = supported_modes[fse->index].width;
-		fse->max_width = fse->min_width;
-		fse->min_height = supported_modes[fse->index].height;
-		fse->max_height = fse->min_height;
-	} else {
-		if (fse->code != MEDIA_BUS_FMT_SENSOR_DATA || fse->index > 0)
-			return -EINVAL;
-
-		fse->min_width = IMX219_EMBEDDED_LINE_WIDTH;
-		fse->max_width = fse->min_width;
-		fse->min_height = IMX219_NUM_EMBEDDED_LINES;
-		fse->max_height = fse->min_height;
-	}
+	fse->min_width = supported_modes[fse->index].width;
+	fse->max_width = fse->min_width;
+	fse->min_height = supported_modes[fse->index].height;
+	fse->max_height = fse->min_height;
 
 	return 0;
-}
-
-static unsigned long imx219_get_pixel_rate(struct imx219 *imx219,
-					   const struct v4l2_mbus_framefmt *format)
-{
-	return ((imx219->lanes == 2) ? IMX219_PIXEL_RATE :
-		IMX219_PIXEL_RATE_4LANE) * imx219_get_rate_factor(imx219, format);
 }
 
 static int imx219_set_pad_format(struct v4l2_subdev *sd,
@@ -853,14 +819,12 @@ static int imx219_set_pad_format(struct v4l2_subdev *sd,
 	struct v4l2_rect *crop;
 	unsigned int bin_h, bin_v;
 
-	if (fmt->pad >= NUM_PADS)
-		return -EINVAL;
+	mode = v4l2_find_nearest_size(supported_modes,
+				      ARRAY_SIZE(supported_modes),
+				      width, height,
+				      fmt->format.width, fmt->format.height);
 
-	if (fmt->pad == IMAGE_PAD) {
-		mode = v4l2_find_nearest_size(supported_modes,
-					      ARRAY_SIZE(supported_modes),
-					      width, height,
-					      fmt->format.width, fmt->format.height);
+	imx219_update_pad_format(imx219, mode, &fmt->format, fmt->format.code);
 
 	format = v4l2_subdev_state_get_format(state, 0);
 	*format = fmt->format;
@@ -1215,10 +1179,9 @@ static int imx219_probe(struct i2c_client *client)
 	imx219->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
 
 	/* Initialize source pad */
-	imx219->pad[IMAGE_PAD].flags = MEDIA_PAD_FL_SOURCE;
-	imx219->pad[METADATA_PAD].flags = MEDIA_PAD_FL_SOURCE;
+	imx219->pad.flags = MEDIA_PAD_FL_SOURCE;
 
-	ret = media_entity_pads_init(&imx219->sd.entity, NUM_PADS, imx219->pad);
+	ret = media_entity_pads_init(&imx219->sd.entity, 1, &imx219->pad);
 	if (ret) {
 		dev_err(dev, "failed to init entity pads: %d\n", ret);
 		goto error_handler_free;
