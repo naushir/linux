@@ -1932,9 +1932,18 @@ static void imx500_clear_fw_network(struct imx500 *imx500)
 		vfree(imx500->fw_network);
 		/*
 		 * Release the PM ref taken when the fw was loaded in
-		 * imx500_set_ctrl().
+		 * imx500_set_ctrl(). This must queue an idle check, as
+		 * pm_runtime_put_noidle() would leave the device active with a
+		 * usage count of zero: it would then never suspend, so never
+		 * resume, so imx500_power_on() - which re-drives XCLR and the
+		 * input clock via the RP2040 bridge - would never run again.
+		 *
+		 * Reaching this from imx500_power_off() is harmless: while a
+		 * blob is cached the ref keeps the device from suspending, so
+		 * as the runtime suspend callback it never takes this branch.
 		 */
-		pm_runtime_put_noidle(&client->dev);
+		pm_runtime_mark_last_busy(&client->dev);
+		pm_runtime_put_autosuspend(&client->dev);
 	}
 
 	imx500->fw_network = NULL;
@@ -2168,7 +2177,8 @@ static int imx500_set_ctrl(struct v4l2_ctrl *ctrl)
 			dev_err(&client->dev, "%s failed to read fw image: %d\n",
 				__func__, ret);
 			/* Release the ref we took above. */
-			pm_runtime_put_noidle(&client->dev);
+			pm_runtime_mark_last_busy(&client->dev);
+			pm_runtime_put_autosuspend(&client->dev);
 			return ret;
 		}
 		if (ret != imx500->fw_network_size) {
