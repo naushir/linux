@@ -24,6 +24,9 @@
 
 #define I2C_RETRIES 4U
 
+/* How long to allow for the RP2040 to boot once its supply is up. */
+#define RP2040_GBDG_BOOT_TIMEOUT_MS 500U
+
 #define ONE_KIB 1024U
 #define MD5_SUFFIX_SIZE 9U
 
@@ -237,6 +240,33 @@ static int rp2040_gbdg_get_device_info(struct i2c_client *client,
 	memcpy(&info->id, read_pos, field_size);
 
 	return 0;
+}
+
+/*
+ * Wait for the device to start answering after its supply has been enabled.
+ *
+ * The regulator's startup-delay-us covers the rail settling, but the RP2040
+ * also has to boot before it will ACK its address, and how long that takes
+ * varies with the rail's rise time. Until it does, i2c_master_recv() returns
+ * -EREMOTEIO (an address NAK) rather than -ETIMEDOUT, so the retry loop in
+ * rp2040_gbdg_get_device_info() does not cover it and a marginally slow rail
+ * fails the probe or the resume outright.
+ */
+static int rp2040_gbdg_wait_for_device(struct i2c_client *client,
+				       unsigned int timeout_ms)
+{
+	unsigned long timeout = jiffies + msecs_to_jiffies(timeout_ms);
+	struct rp2040_gbdg_device_info info;
+	int ret;
+
+	for (;;) {
+		ret = rp2040_gbdg_get_device_info(client, &info);
+		if (!ret)
+			return 0;
+		if (time_after(jiffies, timeout))
+			return ret;
+		usleep_range(5000, 10000);
+	}
 }
 
 static int rp2040_gbdg_poll_device_info(struct i2c_client *client,
@@ -1084,7 +1114,9 @@ static int rp2040_gbdg_probe(struct i2c_client *client)
 	pm_runtime_set_autosuspend_delay(dev, 1000);
 	pm_runtime_use_autosuspend(dev);
 
-	ret = rp2040_gbdg_get_device_info(client, &info);
+	ret = rp2040_gbdg_wait_for_device(client, RP2040_GBDG_BOOT_TIMEOUT_MS);
+	if (!ret)
+		ret = rp2040_gbdg_get_device_info(client, &info);
 	if (ret) {
 		dev_err(dev, "Could not get device info\n");
 		goto err_pm;
@@ -1233,8 +1265,13 @@ static int rp2040_gbdg_runtime_suspend(struct device *dev)
 static int rp2040_gbdg_runtime_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
+	int ret;
 
-	return rp2040_gbdg_power_on(i2c_get_clientdata(client));
+	ret = rp2040_gbdg_power_on(i2c_get_clientdata(client));
+	if (ret)
+		return ret;
+
+	return rp2040_gbdg_wait_for_device(client, RP2040_GBDG_BOOT_TIMEOUT_MS);
 }
 
 static const struct dev_pm_ops rp2040_gbdg_pm_ops = { SET_RUNTIME_PM_OPS(
