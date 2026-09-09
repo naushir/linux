@@ -25,7 +25,7 @@
 	reg_frag: fragment@2 {
 		target = <&cam1_reg>;
 		cam_reg: __overlay__ {
-			startup-delay-us = <300000>;
+			startup-delay-us = <500000>;
 		};
 	};
 
