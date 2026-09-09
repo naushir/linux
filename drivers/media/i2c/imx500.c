@@ -2142,7 +2142,12 @@ static int imx500_set_ctrl(struct v4l2_ctrl *ctrl)
 			return 0;
 		} else if (ctrl->val == S32_MAX) {
 			ctrl->val = -1;
-			if (pm_runtime_get_if_in_use(&client->dev) == 0)
+			/*
+			 * A negative return means runtime PM is disabled, in
+			 * which case no reference was acquired either, so it
+			 * must not be put back below.
+			 */
+			if (pm_runtime_get_if_in_use(&client->dev) <= 0)
 				return 0;
 
 			if (imx500->network_written)
