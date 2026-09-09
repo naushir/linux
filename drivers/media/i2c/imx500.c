@@ -3059,7 +3059,7 @@ static int imx500_power_on(struct device *dev)
 	}
 
 	imx500->reset_gpio =
-		devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
+		devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(imx500->reset_gpio)) {
 		ret = PTR_ERR(imx500->reset_gpio);
 		dev_err(&client->dev, "%s: failed to get reset gpio\n",
