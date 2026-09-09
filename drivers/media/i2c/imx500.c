@@ -2160,8 +2160,13 @@ static int imx500_set_ctrl(struct v4l2_ctrl *ctrl)
 		/*
 		 * Take a pm_runtime reference before the read.  This keeps
 		 * the device active as long as a NW firmware has been loaded.
+		 * On failure no reference is held, so caching the firmware
+		 * would leave the release paths putting a reference that was
+		 * never taken.
 		 */
-		pm_runtime_resume_and_get(&client->dev);
+		ret = pm_runtime_resume_and_get(&client->dev);
+		if (ret < 0)
+			return ret;
 
 		ret = kernel_read_file_from_fd(ctrl->val, 0,
 					       (void **)&imx500->fw_network, INT_MAX,
